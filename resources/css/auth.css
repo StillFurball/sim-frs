@@ -1,0 +1,350 @@
+/*
+ * Authentication pages: the KRS card held out on the moss field, beside the library at night.
+ * Builds on the tokens, buttons and card scallops in landing.css.
+ */
+
+.auth {
+    display: grid;
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+    grid-template-rows: auto 1fr auto;
+    min-height: 100svh;
+    background: var(--field);
+    color: var(--ink);
+    overflow-x: clip;
+}
+
+.auth__photo {
+    grid-column: 1;
+    grid-row: 1 / -1;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    object-fit: cover;
+    object-position: 58% 50%;
+    animation: auth-drift 24s ease-in-out infinite alternate;
+}
+
+@keyframes auth-drift {
+    from {
+        transform: scale(1.06);
+    }
+
+    to {
+        transform: scale(1) translate3d(-1.5%, 0, 0);
+    }
+}
+
+.auth__bar {
+    position: relative;
+    grid-column: 1 / -1;
+    grid-row: 1;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--gap);
+    padding: 28px var(--margin);
+    color: var(--field-ink);
+}
+
+.auth__main {
+    display: contents;
+}
+
+.auth__intro {
+    position: relative;
+    grid-column: 1;
+    grid-row: 2;
+    align-self: end;
+    display: grid;
+    gap: 20px;
+    max-width: 44rem;
+    margin: 0 var(--margin) 40px;
+    padding: clamp(24px, 3vw, 40px);
+    background: rgba(20, 20, 18, 0.78);
+    color: var(--paper);
+}
+
+.auth__title {
+    font-family: var(--font-display);
+    font-weight: 800;
+    font-size: var(--step-head);
+    line-height: 0.88;
+    letter-spacing: -0.005em;
+    text-transform: uppercase;
+    text-wrap: balance;
+}
+
+.auth__lead {
+    max-width: 36ch;
+    font-size: var(--step-lead);
+    line-height: 1.35;
+}
+
+.auth__period {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 14px;
+}
+
+.auth__period .diamond {
+    background: var(--paper);
+}
+
+.auth__card {
+    position: relative;
+    grid-column: 2;
+    grid-row: 2;
+    align-self: center;
+    justify-self: center;
+    width: min(500px, calc(100% - 2 * var(--margin) - 40px));
+    margin: 40px 0;
+    padding: clamp(28px, 3.4vw, 48px);
+    background: var(--paper);
+}
+
+.auth__card-title {
+    font-family: var(--font-display);
+    font-weight: 800;
+    font-size: var(--step-lead);
+    line-height: 1;
+    text-transform: uppercase;
+}
+
+.auth__status {
+    margin-top: 20px;
+    padding: 12px 16px;
+    background: var(--surface);
+    font-weight: 600;
+}
+
+.auth__form {
+    display: grid;
+    gap: 22px;
+    margin-top: 28px;
+}
+
+.auth__row {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px 20px;
+}
+
+.auth__switch {
+    margin-top: 28px;
+}
+
+.auth__imprint {
+    position: relative;
+    grid-column: 1;
+    grid-row: 3;
+    padding: 0 var(--margin) 24px;
+    max-width: 60ch;
+    color: var(--paper);
+}
+
+/* ---------- Fields ---------- */
+
+.field {
+    display: grid;
+    gap: 8px;
+}
+
+.field__label {
+    font-weight: 600;
+}
+
+.field__control {
+    position: relative;
+}
+
+.field__input {
+    width: 100%;
+    min-height: 52px;
+    padding: 0 16px;
+    border: 0;
+    border-bottom: 2px solid var(--ink);
+    border-radius: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 400 var(--step-body) / 1.2 var(--font-text);
+    transition: background-color 160ms ease;
+}
+
+.field__input::placeholder {
+    color: var(--muted);
+}
+
+.field__input:hover {
+    background: var(--surface);
+}
+
+.field__input:focus-visible {
+    outline: 3px solid var(--accent);
+    outline-offset: 2px;
+}
+
+.field__input[aria-invalid='true'] {
+    border-bottom-width: 4px;
+}
+
+.js .field__control:has(.field__toggle) .field__input {
+    padding-right: 128px;
+}
+
+.field__toggle {
+    display: none;
+    position: absolute;
+    top: 50%;
+    right: 6px;
+    min-height: 40px;
+    padding: 0 12px;
+    border: 0;
+    background: transparent;
+    color: var(--ink);
+    font: 600 var(--step-small) / 1 var(--font-text);
+    cursor: pointer;
+    transform: translateY(-50%);
+    transition: background-color 140ms ease;
+}
+
+.js .field__toggle {
+    display: block;
+}
+
+.field__toggle:hover {
+    background: var(--surface);
+}
+
+.field__note {
+    font-size: var(--step-small);
+    color: var(--muted);
+}
+
+.field__error {
+    padding-left: 10px;
+    border-left: 4px solid var(--ink);
+    font-weight: 600;
+}
+
+.check {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 44px;
+    cursor: pointer;
+}
+
+.check input {
+    width: 22px;
+    height: 22px;
+    margin: 0;
+    accent-color: var(--accent);
+}
+
+/* ---------- Entrance: the intro, then the card, then each field ---------- */
+
+.auth__intro > *,
+.auth__card,
+.auth__card > :not(.card__scallop),
+.auth__form > * {
+    animation: auth-rise 700ms var(--ease-out) both;
+}
+
+.auth__intro > :nth-child(2) { animation-delay: 70ms; }
+.auth__intro > :nth-child(3) { animation-delay: 140ms; }
+.auth__card { animation-delay: 120ms; animation-name: auth-card-in; }
+.auth__card > :not(.card__scallop) { animation-delay: 260ms; }
+.auth__form > :nth-child(2) { animation-delay: 330ms; }
+.auth__form > :nth-child(3) { animation-delay: 400ms; }
+.auth__form > :nth-child(4) { animation-delay: 470ms; }
+.auth__form > :nth-child(5) { animation-delay: 540ms; }
+.auth__form > :nth-child(n + 6) { animation-delay: 610ms; }
+
+.auth__card .card__scallop {
+    animation: auth-punch 420ms var(--ease-out) both;
+    animation-delay: 720ms;
+}
+
+.auth__card .card__scallop--tr { animation-delay: 790ms; }
+.auth__card .card__scallop--br { animation-delay: 860ms; }
+.auth__card .card__scallop--bl { animation-delay: 930ms; }
+
+.auth__bar > * {
+    animation: auth-drop 600ms var(--ease-out) both;
+}
+
+.auth__bar > :nth-child(2) { animation-delay: 80ms; }
+
+@keyframes auth-punch {
+    from {
+        transform: scale(0);
+    }
+}
+
+@keyframes auth-drop {
+    from {
+        opacity: 0;
+        transform: translateY(-16px);
+    }
+}
+
+@keyframes auth-rise {
+    from {
+        opacity: 0;
+        transform: translateY(24px);
+    }
+}
+
+@keyframes auth-card-in {
+    from {
+        opacity: 0;
+        transform: translateY(48px) rotate(2deg);
+    }
+}
+
+/* ---------- Phone ---------- */
+
+@media (max-width: 900px) {
+    .auth {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: auto auto auto auto;
+    }
+
+    .auth__photo {
+        grid-row: 1 / 3;
+    }
+
+    .auth__bar {
+        padding: 16px var(--margin);
+    }
+
+    .auth__intro {
+        margin: 96px var(--margin) var(--margin);
+    }
+
+    .auth__card {
+        grid-column: 1;
+        grid-row: 3;
+        width: calc(100% - 2 * var(--margin) - 24px);
+        margin: 48px 0;
+    }
+
+    .auth__imprint {
+        grid-row: 4;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .auth__photo,
+    .auth__intro > *,
+    .auth__card,
+    .auth__card > *,
+    .auth__form > *,
+    .auth__card .card__scallop,
+    .auth__bar > * {
+        animation: none;
+    }
+}
