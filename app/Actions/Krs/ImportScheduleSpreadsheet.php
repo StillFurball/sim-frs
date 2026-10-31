@@ -377,6 +377,7 @@ class ImportScheduleSpreadsheet
                 'prodi' => $values['prodi'] ?? '',
             ],
             [
+                'sks' => (int) $values['sks'],
                 'day' => Day::fromLabel($values['day']),
                 'start_time' => $values['start'],
                 'end_time' => $values['end'],

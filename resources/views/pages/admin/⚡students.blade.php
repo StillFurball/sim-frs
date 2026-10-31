@@ -81,10 +81,9 @@ new #[Title('Mahasiswa')] class extends Component {
             ->select('users.*')
             ->addSelect(['taken_sks' => DB::table('enrollments')
                 ->join('course_classes', 'course_classes.id', '=', 'enrollments.course_class_id')
-                ->join('courses', 'courses.id', '=', 'course_classes.course_id')
                 ->whereColumn('enrollments.user_id', 'users.id')
                 ->where('course_classes.academic_period_id', $activePeriodId)
-                ->selectRaw('coalesce(sum(courses.sks), 0)')])
+                ->selectRaw('coalesce(sum(course_classes.sks), 0)')])
             ->withCount(['courseClasses' => fn ($query) => $query->where('course_classes.academic_period_id', $activePeriodId)])
             ->when($this->search !== '', fn ($query) => $query->where(fn ($query) => $query
                 ->where('name', 'like', "%{$this->search}%")
@@ -399,7 +398,7 @@ new #[Title('Mahasiswa')] class extends Component {
                     <div>
                         <flux:heading size="lg">KRS {{ $this->viewingStudent->name }}</flux:heading>
                         <flux:text class="mt-1">
-                            {{ $viewingClasses->sum(fn ($class) => $class->course->sks) }} / {{ $this->viewingStudent->max_sks }} SKS · {{ $viewingClasses->count() }} kelas
+                            {{ $viewingClasses->sum('sks') }} / {{ $this->viewingStudent->max_sks }} SKS · {{ $viewingClasses->count() }} kelas
                         </flux:text>
                     </div>
 
@@ -429,7 +428,7 @@ new #[Title('Mahasiswa')] class extends Component {
                                     <flux:table.cell class="whitespace-normal">{{ $class->course->name }}</flux:table.cell>
                                     <flux:table.cell>{{ $class->label() }}</flux:table.cell>
                                     <flux:table.cell>{{ $class->scheduleLabel() }}</flux:table.cell>
-                                    <flux:table.cell>{{ $class->course->sks }}</flux:table.cell>
+                                    <flux:table.cell>{{ $class->sks }}</flux:table.cell>
                                     <flux:table.cell align="end">
                                         <flux:button size="sm" variant="danger" icon="x-mark" wire:click="dropClass({{ $class->id }})">Lepas</flux:button>
                                     </flux:table.cell>

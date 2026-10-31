@@ -85,7 +85,7 @@ class User extends Authenticatable
      */
     public function classesInPeriod(AcademicPeriod|int $period): BelongsToMany
     {
-        return $this->courseClasses()->where('course_classes.academic_period_id', $period instanceof AcademicPeriod ? $period->id : $period);
+        return $this->courseClasses()->inPeriod($period);
     }
 
     /**
@@ -109,9 +109,7 @@ class User extends Authenticatable
      */
     public function takenSks(AcademicPeriod|int $period): int
     {
-        return (int) $this->classesInPeriod($period)
-            ->join('courses', 'courses.id', '=', 'course_classes.course_id')
-            ->sum('courses.sks');
+        return (int) $this->classesInPeriod($period)->sum('course_classes.sks');
     }
 
     /**

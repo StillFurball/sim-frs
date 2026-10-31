@@ -132,7 +132,13 @@ new #[Title('Mata Kuliah')] class extends Component {
         ];
 
         if ($this->editingId !== null) {
-            Course::query()->findOrFail($this->editingId)->update($attributes);
+            $course = Course::query()->findOrFail($this->editingId);
+
+            DB::transaction(function () use ($course, $attributes): void {
+                $course->update($attributes);
+                $course->classes()->inPeriod(AcademicPeriod::current()->id ?? 0)->update(['sks' => $attributes['sks']]);
+            });
+
             $message = 'Mata kuliah diperbarui.';
         } else {
             Course::query()->create($attributes);
@@ -275,7 +281,7 @@ new #[Title('Mata Kuliah')] class extends Component {
                         <flux:select.option wire:key="type-option-{{ $courseType->value }}" value="{{ $courseType->value }}">{{ $courseType->label() }}</flux:select.option>
                     @endforeach
                 </flux:select>
-                <flux:input wire:model="sks" label="SKS" type="number" min="1" max="24" required />
+                <flux:input wire:model="sks" label="SKS" type="number" min="1" max="24" required description="Berlaku untuk kelas di periode aktif dan kelas baru. Periode lain tidak berubah." />
             </div>
 
             <div class="flex justify-end gap-2">

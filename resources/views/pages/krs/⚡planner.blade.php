@@ -642,7 +642,7 @@ new #[Title('Rencana Otomatis')] class extends Component {
                                 <flux:table.cell class="whitespace-normal">
                                     <span class="font-medium">{{ $class->course->name }}</span>
                                     <flux:badge size="sm" :color="$class->course->type->color()" class="ms-1">{{ $class->course->type->label() }}</flux:badge>
-                                    <span class="text-xs text-zinc-500">{{ $class->course->sks }} SKS</span>
+                                    <span class="text-xs text-zinc-500">{{ $class->sks }} SKS</span>
                                 </flux:table.cell>
                                 <flux:table.cell>{{ $class->label() }}</flux:table.cell>
                                 <flux:table.cell>{{ $class->scheduleLabel() }}</flux:table.cell>

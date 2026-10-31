@@ -59,7 +59,7 @@ new #[Title('Dashboard')] class extends Component {
     public function studentSummary(): array
     {
         return [
-            'sks' => $this->takenClasses->sum(fn (CourseClass $class): int => $class->course->sks),
+            'sks' => $this->takenClasses->sum('sks'),
             'courses' => $this->takenClasses->unique('course_id')->count(),
             'days' => $this->takenClasses->map(fn (CourseClass $class): int => $class->day->value)->unique()->count(),
         ];

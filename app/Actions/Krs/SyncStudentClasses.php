@@ -40,9 +40,10 @@ class SyncStudentClasses
                 throw new EnrollmentException('Sebagian kelas yang dipilih sudah tidak tersedia.');
             }
 
-            $this->validate($student, $period, $classes);
-
             $currentClassIds = $this->currentClassIds($student, $period);
+
+            $this->validate($student, $period, $classes, $currentClassIds);
+
             $selectedClassIds = $classes->modelKeys();
 
             $student->courseClasses()->detach(array_values(array_diff($currentClassIds, $selectedClassIds)));
@@ -54,10 +55,11 @@ class SyncStudentClasses
      * Check every enrollment rule against the full selection for the period.
      *
      * @param  Collection<int, CourseClass>  $classes
+     * @param  list<int>|null  $currentClassIds  The classes the student already holds in the period; loaded when null.
      *
      * @throws EnrollmentException
      */
-    public function validate(User $student, AcademicPeriod $period, Collection $classes): void
+    public function validate(User $student, AcademicPeriod $period, Collection $classes, ?array $currentClassIds = null): void
     {
         if (! $student->isStudent()) {
             throw new EnrollmentException('Hanya mahasiswa yang dapat mengisi KRS.');
@@ -79,7 +81,7 @@ class SyncStudentClasses
             throw new EnrollmentException("Mata kuliah {$duplicateCourse->first()?->course->name} hanya boleh diambil di satu kelas.");
         }
 
-        $totalSks = $classes->sum(fn (CourseClass $class): int => $class->course->sks);
+        $totalSks = $classes->sum('sks');
 
         if ($totalSks > $student->max_sks) {
             throw new EnrollmentException("Total SKS ({$totalSks}) melebihi batas SKS kamu ({$student->max_sks}).");
@@ -97,7 +99,7 @@ class SyncStudentClasses
             }
         }
 
-        $currentClassIds = $this->currentClassIds($student, $period);
+        $currentClassIds ??= $this->currentClassIds($student, $period);
 
         foreach ($classes as $class) {
             if (! in_array($class->id, $currentClassIds, true) && $class->isFull()) {

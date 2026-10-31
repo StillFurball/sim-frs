@@ -95,7 +95,7 @@ class WelcomeController extends Controller
             'id' => $course->id,
             'name' => $course->name,
             'short' => $this->abbreviate($course->name),
-            'sks' => $course->sks,
+            'sks' => $course->classes->first()->sks ?? $course->sks,
             'type' => $course->type->label(),
             'classes' => array_values($course->classes->map(fn (CourseClass $class): array => [
                 'id' => $class->id,

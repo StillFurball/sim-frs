@@ -264,7 +264,7 @@ new #[Title('Isi KRS')] class extends Component {
     #[Computed]
     public function takenSks(): int
     {
-        return $this->myClasses->sum(fn (CourseClass $class): int => $class->course->sks);
+        return $this->myClasses->sum('sks');
     }
 
     /**
@@ -363,7 +363,7 @@ new #[Title('Isi KRS')] class extends Component {
             return ['blocked', 'Penuh', 'red', null];
         }
 
-        $sksAfter = $this->takenSks - ($sameCourse?->course->sks ?? 0) + $class->course->sks;
+        $sksAfter = $this->takenSks - ($sameCourse?->sks ?? 0) + $class->sks;
 
         if ($sksAfter > $this->student->max_sks) {
             return ['blocked', 'Melebihi batas SKS', 'orange', null];
@@ -472,7 +472,7 @@ new #[Title('Isi KRS')] class extends Component {
                                 <flux:badge size="sm" :color="$taken->course->type->color()">{{ $taken->course->type->label() }}</flux:badge>
                             </div>
                             <flux:text class="text-sm">
-                                Kelas {{ $taken->label() }} · {{ $taken->scheduleLabel() }} · {{ $taken->course->sks }} SKS
+                                Kelas {{ $taken->label() }} · {{ $taken->scheduleLabel() }} · {{ $taken->sks }} SKS
                                 @if ($taken->room)
                                     · {{ $taken->room }}
                                 @endif
@@ -552,7 +552,7 @@ new #[Title('Isi KRS')] class extends Component {
                                     <div class="text-xs text-zinc-500 dark:text-zinc-400">{{ $class->prodi }}</div>
                                 @endif
                             </flux:table.cell>
-                            <flux:table.cell>{{ $class->course->sks }}</flux:table.cell>
+                            <flux:table.cell>{{ $class->sks }}</flux:table.cell>
                             <flux:table.cell class="whitespace-normal">{{ $class->lecturerCodes() ?: '—' }}</flux:table.cell>
                             <flux:table.cell class="min-w-44 whitespace-normal">
                                 <div>{{ $class->scheduleLabel() }}</div>

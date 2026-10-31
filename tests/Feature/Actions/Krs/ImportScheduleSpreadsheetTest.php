@@ -157,6 +157,24 @@ it('imports a CSV with title rows, semicolons and a combined time column', funct
         ->and($graphics->language)->toBe('Indonesia');
 });
 
+it('keeps the sks of past periods when a new period changes the sks of a course', function () {
+    $past = AcademicPeriod::factory()->create(['start_year' => 2020]);
+    $student = User::factory()->create();
+    $pastClass = CourseClass::factory()->inPeriod($past)
+        ->for(Course::factory()->state(['code' => 'EF1', 'sks' => 3]))
+        ->create(['name' => 'A', 'prodi' => '']);
+    $student->courseClasses()->attach($pastClass);
+
+    app(ImportScheduleSpreadsheet::class)->handle(scheduleCsvFile(implode("\n", [
+        'Kode;Mata Kuliah;Kelas;SKS;Hari;Mulai;Selesai',
+        'EF1;Basis Data;A;4;Senin;07.00;09.50',
+    ])), currentKrsPeriod());
+
+    expect(CourseClass::inPeriod(currentKrsPeriod())->sole()->sks)->toBe(4)
+        ->and($pastClass->refresh()->sks)->toBe(3)
+        ->and($student->takenSks($past))->toBe(3);
+});
+
 it('normalises spreadsheet time formats', function (string $start, string $expected) {
     $path = scheduleCsvFile("Mata Kuliah,Hari,SKS,Mulai,Selesai\nAlgoritma,Senin,3,{$start},23:00");
 

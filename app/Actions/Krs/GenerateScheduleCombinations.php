@@ -58,7 +58,7 @@ class GenerateScheduleCombinations
     /**
      * Candidate classes sorted by day and start time.
      *
-     * @var list<array{id: int, course: int, day: int, start: int, end: int, preferred: bool, priority: bool}>
+     * @var list<array{id: int, course: int, sks: int, day: int, start: int, end: int, preferred: bool, priority: bool}>
      */
     private array $pool = [];
 
@@ -146,7 +146,8 @@ class GenerateScheduleCombinations
             }
         }
 
-        $requiredSks = collect($requiredCourseIds)->sum(fn (int $courseId): int => $courses[$courseId]->sks);
+        $requiredSks = collect($requiredCourseIds)
+            ->sum(fn (int $courseId): int => (int) ($candidates[$courseId] ?? $classes->where('course_id', $courseId))->min('sks'));
 
         if ($requiredSks > $preferences->maxSks) {
             $warnings[] = "Total SKS mata kuliah wajib ({$requiredSks}) melebihi batas {$preferences->maxSks} SKS.";
@@ -326,7 +327,7 @@ class GenerateScheduleCombinations
 
             $entries[$courseIndex] = [
                 'id' => $courseId,
-                'sks' => $course->sks,
+                'sks' => (int) $candidates[$courseId]->max('sks'),
                 'elective' => $course->type === CourseType::Elective,
                 'priority' => $isPriority,
                 'required' => in_array($courseId, $requiredCourseIds, true),
@@ -336,6 +337,7 @@ class GenerateScheduleCombinations
                 $pool[] = [
                     'id' => $class->id,
                     'course' => $courseIndex,
+                    'sks' => $class->sks,
                     'day' => $class->day->value,
                     'start' => $this->minutes($class->start_time),
                     'end' => $this->minutes($class->end_time),
@@ -437,7 +439,7 @@ class GenerateScheduleCombinations
         $previousEnd = $this->dayEnd[$class['day']] ?? null;
 
         $canTake = ! $this->courseTaken[$class['course']]
-            && $sks + $course['sks'] <= $preferences->maxSks
+            && $sks + $class['sks'] <= $preferences->maxSks
             && ($previousEnd === null || $class['start'] >= $previousEnd)
             && ! ($course['elective'] && ! $course['required'] && $preferences->maxElectives !== null && $electives >= $preferences->maxElectives);
 
@@ -450,7 +452,7 @@ class GenerateScheduleCombinations
 
             $this->search(
                 $position + 1,
-                $sks + $course['sks'],
+                $sks + $class['sks'],
                 $electives + ($course['elective'] ? 1 : 0),
                 $priorities + ($course['priority'] ? 1 : 0),
                 $preferred + ($class['preferred'] ? 1 : 0),

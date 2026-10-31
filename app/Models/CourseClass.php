@@ -18,6 +18,7 @@ use Illuminate\Support\Carbon;
  * @property int $id
  * @property int $academic_period_id
  * @property int $course_id
+ * @property int $sks
  * @property string $name
  * @property string $prodi
  * @property Day $day
@@ -33,11 +34,23 @@ use Illuminate\Support\Carbon;
  * @property-read Course $course
  * @property-read AcademicPeriod $academicPeriod
  */
-#[Fillable(['academic_period_id', 'course_id', 'name', 'prodi', 'day', 'start_time', 'end_time', 'room', 'capacity', 'language', 'ramadhan_schedule'])]
+#[Fillable(['academic_period_id', 'course_id', 'sks', 'name', 'prodi', 'day', 'start_time', 'end_time', 'room', 'capacity', 'language', 'ramadhan_schedule'])]
 class CourseClass extends Model
 {
     /** @use HasFactory<CourseClassFactory> */
     use HasFactory;
+
+    /**
+     * Take the SKS from the course catalogue when a class is created or moved to another course without its own SKS.
+     */
+    protected static function booted(): void
+    {
+        static::saving(function (CourseClass $class): void {
+            if (! $class->isDirty('sks') && (! $class->exists || $class->isDirty('course_id'))) {
+                $class->sks = Course::query()->whereKey($class->course_id)->value('sks');
+            }
+        });
+    }
 
     /**
      * Get the attributes that should be cast.
@@ -49,6 +62,7 @@ class CourseClass extends Model
         return [
             'academic_period_id' => 'integer',
             'course_id' => 'integer',
+            'sks' => 'integer',
             'day' => Day::class,
             'capacity' => 'integer',
         ];

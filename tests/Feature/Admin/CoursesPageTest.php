@@ -1,6 +1,7 @@
 <?php
 
 use App\Enums\CourseType;
+use App\Models\AcademicPeriod;
 use App\Models\Course;
 use App\Models\CourseClass;
 use App\Models\User;
@@ -73,6 +74,22 @@ test('admins can update a course', function () {
 
     expect($course->refresh()->name)->toBe('Nama Baru')
         ->and($course->sks)->toBe(2);
+});
+
+test('changing the sks of a course only changes its classes in the active period', function () {
+    $this->actingAs(User::factory()->admin()->create());
+    $course = Course::factory()->create(['sks' => 3]);
+    $activeClass = CourseClass::factory()->for($course)->inPeriod(AcademicPeriod::factory()->active()->create())->create();
+    $pastClass = CourseClass::factory()->for($course)->inPeriod(AcademicPeriod::factory()->create(['start_year' => 2020]))->create();
+
+    Livewire::test('pages::admin.courses')
+        ->call('edit', $course->id)
+        ->set('sks', '4')
+        ->call('save')
+        ->assertHasNoErrors();
+
+    expect($activeClass->refresh()->sks)->toBe(4)
+        ->and($pastClass->refresh()->sks)->toBe(3);
 });
 
 test('deleting a course removes its classes and enrollments', function () {

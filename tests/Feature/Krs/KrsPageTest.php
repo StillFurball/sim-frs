@@ -69,6 +69,26 @@ test('taking a class beyond the SKS limit is rejected', function () {
     $this->assertDatabaseMissing('enrollments', ['user_id' => $student->id, 'course_class_id' => $extra->id]);
 });
 
+test('students cannot lower their SKS limit below the SKS already taken', function () {
+    $student = User::factory()->maxSks(24)->create();
+    $takenClasses = collect(['07:00', '10:00', '13:30', '15:30'])
+        ->map(fn (string $start) => CourseClass::factory()->at(Day::Senin, $start)->create())
+        ->concat([
+            CourseClass::factory()->at(Day::Selasa, '07:00')->create(),
+            CourseClass::factory()->at(Day::Selasa, '10:00')->create(),
+            CourseClass::factory()->at(Day::Selasa, '13:30')->create(),
+        ]);
+    $student->courseClasses()->attach($takenClasses->pluck('id')->all());
+    $this->actingAs($student);
+
+    Livewire::test('pages::krs.index')
+        ->set('maxSks', 18)
+        ->assertHasErrors(['maxSks'])
+        ->assertSet('maxSks', 24);
+
+    expect($student->refresh()->max_sks)->toBe(24);
+});
+
 test('taking another class of a taken course moves the student to it', function () {
     $student = User::factory()->create();
     $course = Course::factory()->create();
