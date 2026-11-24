@@ -9,7 +9,9 @@ use App\Models\AcademicPeriod;
 use App\Models\Course;
 use App\Models\CourseClass;
 use App\Models\Lecturer;
+use App\Support\ScheduleGrid;
 use App\Support\ScheduleImportResult;
+use App\Support\Worksheet;
 use App\Support\XlsxReader;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -17,7 +19,8 @@ use Illuminate\Support\Str;
 /**
  * Import the classes of one academic period, plus their courses and lecturers, from a schedule spreadsheet (.xlsx or .csv).
  *
- * The header row is detected automatically, so title rows above it and summary rows below the table are ignored.
+ * Two layouts are recognised: a flat table with one class per row (its header row is detected automatically, so title
+ * rows above it and summary rows below it are ignored), and the department's room-by-time-slot grid (see ScheduleGrid).
  * Courses are a catalogue shared by every period; classes are matched on period + course + class name + prodi, which
  * makes repeated imports into the same period update rather than duplicate.
  */
@@ -52,7 +55,7 @@ class ImportScheduleSpreadsheet
      */
     private const int HEADER_SEARCH_ROWS = 30;
 
-    public function __construct(private XlsxReader $reader) {}
+    public function __construct(private XlsxReader $reader, private ScheduleGrid $grid) {}
 
     /**
      * Import the spreadsheet at the given path into the academic period.
@@ -64,11 +67,20 @@ class ImportScheduleSpreadsheet
     public function handle(string $path, AcademicPeriod $period, bool $replaceExisting = false, ?string $extension = null): ScheduleImportResult
     {
         $extension = Str::lower($extension ?? pathinfo($path, PATHINFO_EXTENSION));
-        $rows = $extension === 'csv' ? $this->csvRows($path) : $this->reader->rows($path);
+        $sheet = $extension === 'csv' ? new Worksheet($this->csvRows($path)) : $this->reader->read($path);
 
-        [$headerIndex, $columns] = $this->locateHeader($rows);
+        $records = $this->tableRecords($sheet->rows)
+            ?? $this->grid->records($sheet)
+            ?? throw new ScheduleImportException('Baris header tidak ditemukan. Pastikan ada kolom "Mata Kuliah", "Hari", "SKS", "Mulai" dan "Selesai".');
 
-        return DB::transaction(function () use ($rows, $headerIndex, $columns, $period, $replaceExisting): ScheduleImportResult {
+        foreach ($records as &$record) {
+            $record['error'] ??= $this->validateRow($record['values']);
+        }
+
+        unset($record);
+        $courseAttributes = $this->majorityCourseAttributes($records);
+
+        return DB::transaction(function () use ($records, $courseAttributes, $period, $replaceExisting): ScheduleImportResult {
             if ($replaceExisting) {
                 CourseClass::query()->inPeriod($period)->delete();
             }
@@ -78,32 +90,20 @@ class ImportScheduleSpreadsheet
             $classesUpdated = 0;
             $rowsSkipped = 0;
             $errors = [];
+            $importedFrom = [];
 
-            for ($index = $headerIndex + 1, $total = count($rows); $index < $total; $index++) {
-                $rowNumber = $index + 1;
-                $values = $this->extractValues($rows[$index], $columns);
-
-                if ($this->isNotScheduleRow($values)) {
-                    continue;
-                }
-
-                $error = $this->validateRow($values);
-
-                if ($error !== null) {
-                    $errors[] = "Baris {$rowNumber}: {$error}";
-                    $rowsSkipped++;
-
-                    continue;
-                }
-
-                $course = $this->upsertCourse($values, $error);
+            foreach ($records as ['label' => $label, 'values' => $values, 'error' => $error]) {
+                $error ??= $this->duplicateClassError($values, $importedFrom);
+                $course = $error === null ? $this->upsertCourse($values, $courseAttributes[$this->courseKey($values)], $error) : null;
 
                 if ($course === null) {
-                    $errors[] = "Baris {$rowNumber}: {$error}";
+                    $errors[] = "{$label}: {$error}";
                     $rowsSkipped++;
 
                     continue;
                 }
+
+                $importedFrom[$this->classKey($values)] = $label;
 
                 if ($course->wasRecentlyCreated) {
                     $coursesCreated++;
@@ -158,14 +158,44 @@ class ImportScheduleSpreadsheet
     }
 
     /**
-     * Find the header row and map each recognised column to its index.
+     * Turn the rows below a flat table's header into schedule records, or return null when there is no table header.
      *
      * @param  list<list<string|null>>  $rows
-     * @return array{0: int, 1: array<string, int>}
+     * @return list<array{label: string, values: array<string, string|null>, error: string|null}>|null
      *
      * @throws ScheduleImportException
      */
-    private function locateHeader(array $rows): array
+    private function tableRecords(array $rows): ?array
+    {
+        $header = $this->locateHeader($rows);
+
+        if ($header === null) {
+            return null;
+        }
+
+        [$headerIndex, $columns] = $header;
+        $records = [];
+
+        for ($index = $headerIndex + 1, $total = count($rows); $index < $total; $index++) {
+            $values = $this->extractValues($rows[$index], $columns);
+
+            if (! $this->isNotScheduleRow($values)) {
+                $records[] = ['label' => 'Baris '.($index + 1), 'values' => $values, 'error' => null];
+            }
+        }
+
+        return $records;
+    }
+
+    /**
+     * Find the header row of a flat table and map each recognised column to its index.
+     *
+     * @param  list<list<string|null>>  $rows
+     * @return array{0: int, 1: array<string, int>}|null
+     *
+     * @throws ScheduleImportException
+     */
+    private function locateHeader(array $rows): ?array
     {
         foreach (array_slice($rows, 0, self::HEADER_SEARCH_ROWS) as $index => $row) {
             $columns = [];
@@ -193,7 +223,7 @@ class ImportScheduleSpreadsheet
             }
         }
 
-        throw new ScheduleImportException('Baris header tidak ditemukan. Pastikan ada kolom "Mata Kuliah", "Hari", "SKS", "Mulai" dan "Selesai".');
+        return null;
     }
 
     /**
@@ -299,6 +329,83 @@ class ImportScheduleSpreadsheet
     }
 
     /**
+     * Explain why a class that an earlier row or cell of this import already wrote cannot be imported again: a class
+     * has a single weekly meeting, so a second one would silently overwrite the first.
+     *
+     * @param  array<string, string|null>  $values
+     * @param  array<string, string>  $importedFrom  Labels of the rows/cells already imported, keyed by classKey().
+     */
+    private function duplicateClassError(array $values, array $importedFrom): ?string
+    {
+        $source = $importedFrom[$this->classKey($values)] ?? null;
+
+        if ($source === null) {
+            return null;
+        }
+
+        $class = trim($values['name'].' '.(in_array($values['class'], [null, '-'], true) ? '' : $values['class']));
+        $prodi = filled($values['prodi']) ? " ({$values['prodi']})" : '';
+
+        return "kelas {$class}{$prodi} sudah diimpor dari {$source}; satu kelas hanya dapat memiliki satu jadwal.";
+    }
+
+    /**
+     * Identify the class a row describes within a single import: course + class name + prodi.
+     *
+     * @param  array<string, string|null>  $values
+     */
+    private function classKey(array $values): string
+    {
+        return implode('|', [$this->courseKey($values), Str::lower($values['class'] ?? '-'), Str::lower($values['prodi'] ?? '')]);
+    }
+
+    /**
+     * Identify the course a row describes within a single import: its code, else its name.
+     *
+     * @param  array<string, string|null>  $values
+     */
+    private function courseKey(array $values): string
+    {
+        return Str::lower((string) ($values['code'] ?? $values['name']));
+    }
+
+    /**
+     * Pick each course's semester, type and SKS by majority over its valid rows (ties go to the first row).
+     *
+     * Semester, type and SKS belong to the shared course, yet study programs may schedule the same course in different
+     * semesters (e.g. a mandatory semester 6 course for IF taught in semester 4 for RPL). The value most classes agree on
+     * wins instead of whichever row happens to come last.
+     *
+     * @param  list<array{label: string, values: array<string, string|null>, error: string|null}>  $records
+     * @return array<string, array{semester: string|null, type: string|null, sks: string|null}>
+     */
+    private function majorityCourseAttributes(array $records): array
+    {
+        $votes = [];
+
+        foreach ($records as ['values' => $values, 'error' => $error]) {
+            if ($error !== null) {
+                continue;
+            }
+
+            $key = $this->courseKey($values);
+            $votes[$key] ??= ['semester' => [], 'type' => [], 'sks' => []];
+
+            foreach (array_keys($votes[$key]) as $attribute) {
+                if ($values[$attribute] !== null) {
+                    $votes[$key][$attribute][$values[$attribute]] = ($votes[$key][$attribute][$values[$attribute]] ?? 0) + 1;
+                }
+            }
+        }
+
+        return array_map(fn (array $attributes): array => array_map(function (array $counts): ?string {
+            arsort($counts);
+
+            return $counts === [] ? null : (string) array_key_first($counts);
+        }, $attributes), $votes);
+    }
+
+    /**
      * Normalise spreadsheet time values ("07.00", "7:00", "13.3", or an Excel day fraction) to "HH:MM".
      */
     private function normalizeTime(?string $value): ?string
@@ -329,8 +436,9 @@ class ImportScheduleSpreadsheet
      * Create or update the course described by a row, matched by code first and then by name.
      *
      * @param  array<string, string|null>  $values
+     * @param  array{semester: string|null, type: string|null, sks: string|null}  $attributes  Course attributes agreed by the import's rows.
      */
-    private function upsertCourse(array $values, ?string &$error): ?Course
+    private function upsertCourse(array $values, array $attributes, ?string &$error): ?Course
     {
         $code = $values['code'] !== null ? Str::upper($values['code']) : null;
         $name = (string) $values['name'];
@@ -354,9 +462,9 @@ class ImportScheduleSpreadsheet
         $course->fill([
             'code' => $code ?? $course->code,
             'name' => $name,
-            'semester' => $values['semester'] !== null ? (int) $values['semester'] : $course->semester,
-            'type' => CourseType::fromLabel($values['type']) ?? ($course->exists ? $course->type : CourseType::Elective),
-            'sks' => (int) $values['sks'],
+            'semester' => $attributes['semester'] !== null ? (int) $attributes['semester'] : $course->semester,
+            'type' => CourseType::fromLabel($attributes['type']) ?? ($course->exists ? $course->type : CourseType::Elective),
+            'sks' => (int) ($attributes['sks'] ?? $values['sks']),
         ])->save();
 
         return $course;

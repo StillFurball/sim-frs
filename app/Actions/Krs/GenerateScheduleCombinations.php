@@ -19,12 +19,16 @@ use Illuminate\Support\Str;
  *
  * Every required course (the semester's mandatory courses, explicitly required courses and locked classes) gets
  * exactly one class; optional courses (electives and, when allowed, general or other-semester mandatory courses)
- * are added on top.
+ * are added on top. Remedial classes ("kelas R") are left out unless the student explicitly requires or prioritises
+ * their course, so retake-only courses never inflate the semester's mandatory load.
  *
- * The search is a depth-first branch-and-bound that walks the candidate classes in chronological order and decides
- * for each one whether to take it. Walking in time order makes clash detection a single comparison per day and makes
- * the day and idle-time penalties grow monotonically, which keeps the upper bound tight and the search fast. The best
- * combination is kept for each distinct set of courses, so the results show genuinely different study plans.
+ * The search is a depth-first branch-and-bound over courses: required courses first (fewest classes first), then the
+ * optional ones, picking one class (or, for optional courses, none) per course. Because the optional courses are
+ * decided last, backtracking varies the set of courses before it revisits the classes of the required ones, so
+ * distinct study plans are found right away instead of after every arrangement of parallel classes. The upper bound
+ * uses the exact SKS total still reachable within the limit (a subset sum over the remaining courses), which prunes
+ * branches that cannot fill the limit any better. The results prefer distinct sets of courses; when there are fewer
+ * of those than requested, alternative arrangements of the same courses (other parallel classes) fill the list.
  */
 class GenerateScheduleCombinations
 {
@@ -56,25 +60,65 @@ class GenerateScheduleCombinations
     private const int NODE_BUDGET = 1_500_000;
 
     /**
-     * Candidate classes sorted by day and start time.
+     * Candidate classes, grouped per course in the order the search tries them.
      *
-     * @var list<array{id: int, course: int, sks: int, day: int, start: int, end: int, preferred: bool, priority: bool}>
+     * @var list<array{id: int, course: int, sks: int, day: int, start: int, end: int, preferred: bool}>
      */
     private array $pool = [];
 
     /**
-     * Courses in the search, indexed by a dense course index.
+     * Courses in search order (required first), each with the pool positions of its candidate classes.
      *
-     * @var list<array{id: int, sks: int, elective: bool, priority: bool, required: bool, lastPosition: int, lastPreferredPosition: int}>
+     * @var list<array{id: int, elective: bool, priority: bool, required: bool, classes: list<int>}>
      */
     private array $courses = [];
 
     /**
-     * Best combination per course set, keyed by the sorted course IDs.
+     * For each course index, a bitmask of the SKS totals the courses from that index on can still add (bit n = n SKS).
      *
-     * @var array<string, array{key: string, score: float, classes: list<int>, sks: int, electives: int, priorities: int, preferred: int, days: int, gaps: int}>
+     * @var array<int, int>
+     */
+    private array $suffixReachableSks = [];
+
+    /**
+     * For each course index, how many of the courses from that index on are electives.
+     *
+     * @var array<int, int>
+     */
+    private array $suffixElectives = [];
+
+    /**
+     * For each course index, how many of the courses from that index on are priority courses.
+     *
+     * @var array<int, int>
+     */
+    private array $suffixPriorities = [];
+
+    /**
+     * For each course index, how many of the courses from that index on have a class with a preferred lecturer.
+     *
+     * @var array<int, int>
+     */
+    private array $suffixPreferred = [];
+
+    /**
+     * For each course index, how many of the courses from that index on are required.
+     *
+     * @var array<int, int>
+     */
+    private array $suffixRequired = [];
+
+    /**
+     * Best arrangements (sets of parallel classes) per course set, best first, keyed by the sorted course IDs.
+     *
+     * @var array<string, list<array{key: string, classKey: string, score: float, classes: list<int>, sks: int, electives: int, priorities: int, preferred: int, days: int, gaps: int}>>
      */
     private array $best = [];
+
+    /**
+     * Score a combination must beat to still make the result list; see raiseCutoff().
+     */
+    private float $cutoff = -INF;
 
     /**
      * Pool positions of the classes currently chosen.
@@ -84,18 +128,11 @@ class GenerateScheduleCombinations
     private array $chosen = [];
 
     /**
-     * Whether each course (by dense index) already has a chosen class.
+     * Start and end (in minutes) of the chosen classes, per day.
      *
-     * @var array<int, bool>
+     * @var array<int, list<array{0: int, 1: int}>>
      */
-    private array $courseTaken = [];
-
-    /**
-     * End time (in minutes) of the last chosen class per day.
-     *
-     * @var array<int, int>
-     */
-    private array $dayEnd = [];
+    private array $dayIntervals = [];
 
     private PlannerPreferences $preferences;
 
@@ -132,13 +169,21 @@ class GenerateScheduleCombinations
 
         $candidates = $classes
             ->reject(fn (CourseClass $class): bool => in_array($class->course_id, $lockedCourseIds, true))
+            ->reject(fn (CourseClass $class): bool => $class->isRemedial() && ! $this->isChosenByStudent($class->course_id))
             ->filter(fn (CourseClass $class): bool => $this->passesFilters($class, $currentClassIds))
             ->concat($lockedClasses)
             ->groupBy('course_id');
 
         $courses = $classes->map(fn (CourseClass $class): Course => $class->course)->unique('id')->keyBy('id');
+        $regularCourseIds = $classes
+            ->reject(fn (CourseClass $class): bool => $class->isRemedial())
+            ->filter(fn (CourseClass $class): bool => $this->isOpenForPreferredProdi($class))
+            ->map(fn (CourseClass $class): int => (int) $class->course_id)
+            ->unique()
+            ->values()
+            ->all();
 
-        $requiredCourseIds = $this->requiredCourseIds($courses, $lockedCourseIds);
+        $requiredCourseIds = $this->requiredCourseIds($courses, $regularCourseIds, $lockedCourseIds);
 
         foreach ($requiredCourseIds as $courseId) {
             if (! $candidates->has($courseId)) {
@@ -150,7 +195,8 @@ class GenerateScheduleCombinations
             ->sum(fn (int $courseId): int => (int) ($candidates[$courseId] ?? $classes->where('course_id', $courseId))->min('sks'));
 
         if ($requiredSks > $preferences->maxSks) {
-            $warnings[] = "Total SKS mata kuliah wajib ({$requiredSks}) melebihi batas {$preferences->maxSks} SKS.";
+            $warnings[] = "Total SKS mata kuliah wajib ({$requiredSks}) melebihi batas {$preferences->maxSks} SKS."
+                .(count($preferences->prodi) !== 1 ? ' Pilih prodi kamu saja di filter Prodi agar MK wajib prodi lain tidak ikut diwajibkan.' : '');
         }
 
         $optionalCourseIds = $courses
@@ -169,12 +215,29 @@ class GenerateScheduleCombinations
             $warnings[] = "Hanya {$availableElectives} mata kuliah pilihan yang memenuhi filter, kurang dari minimal {$preferences->minElectives}.";
         }
 
+        if ($warnings === []) {
+            $requiredElectives = collect($requiredCourseIds)->filter(fn (int $courseId): bool => $courses[$courseId]->type === CourseType::Elective)->count();
+            $electivesNeeded = max(0, $preferences->minElectives - $requiredElectives);
+            $lightestElectivesSks = collect($optionalCourseIds)
+                ->filter(fn (int $courseId): bool => $courses[$courseId]->type === CourseType::Elective)
+                ->map(fn (int $courseId): int => (int) $candidates[$courseId]->min('sks'))
+                ->sort()
+                ->take($electivesNeeded)
+                ->sum();
+
+            if ($electivesNeeded > 0 && $requiredSks + $lightestElectivesSks > $preferences->maxSks) {
+                $warnings[] = "Batas {$preferences->maxSks} SKS tidak cukup: MK wajib {$requiredSks} SKS ditambah minimal {$preferences->minElectives} MK pilihan"
+                    ." (paling ringan {$lightestElectivesSks} SKS) menjadi ".($requiredSks + $lightestElectivesSks).' SKS.'
+                    .' Kurangi "Minimal MK pilihan" atau lepas MK yang diwajibkan.';
+            }
+        }
+
         if ($warnings !== []) {
             return new PlannerResult([], $warnings, 0, false);
         }
 
         $this->buildSearchSpace($courses, $candidates, $requiredCourseIds, $optionalCourseIds);
-        $this->search(0, 0, 0, 0, 0, 0, 0);
+        $this->search(0, 0, 0, 0, 0, 0);
 
         $combinations = $this->combinations($classes->keyBy('id'));
         $truncated = $this->nodes >= self::NODE_BUDGET;
@@ -200,10 +263,15 @@ class GenerateScheduleCombinations
         $this->gapHourWeight = $preferences->minimizeGaps ? self::GAP_HOUR_WEIGHT : self::DEFAULT_GAP_HOUR_WEIGHT;
         $this->pool = [];
         $this->courses = [];
+        $this->suffixReachableSks = [];
+        $this->suffixElectives = [];
+        $this->suffixPriorities = [];
+        $this->suffixPreferred = [];
+        $this->suffixRequired = [];
         $this->best = [];
+        $this->cutoff = -INF;
         $this->chosen = [];
-        $this->courseTaken = [];
-        $this->dayEnd = [];
+        $this->dayIntervals = [];
         $this->nodes = 0;
     }
 
@@ -232,13 +300,8 @@ class GenerateScheduleCombinations
             return false;
         }
 
-        if ($preferences->prodi !== [] && $class->prodiList() !== []) {
-            $wanted = array_map(fn (string $prodi): string => Str::upper(trim($prodi)), $preferences->prodi);
-            $offered = array_map(fn (string $prodi): string => Str::upper($prodi), $class->prodiList());
-
-            if (array_intersect($wanted, $offered) === []) {
-                return false;
-            }
+        if (! $this->isOpenForPreferredProdi($class)) {
+            return false;
         }
 
         if ($class->lecturers->pluck('id')->intersect($preferences->avoidedLecturerIds)->isNotEmpty()) {
@@ -257,6 +320,22 @@ class GenerateScheduleCombinations
     }
 
     /**
+     * Determine whether a class is opened for one of the preferred study programs. Classes without a prodi, or a
+     * planner run without a prodi preference, match everything.
+     */
+    private function isOpenForPreferredProdi(CourseClass $class): bool
+    {
+        if ($this->preferences->prodi === [] || $class->prodiList() === []) {
+            return true;
+        }
+
+        $wanted = array_map(fn (string $prodi): string => Str::upper(trim($prodi)), $this->preferences->prodi);
+        $offered = array_map(fn (string $prodi): string => Str::upper($prodi), $class->prodiList());
+
+        return array_intersect($wanted, $offered) !== [];
+    }
+
+    /**
      * Normalise a language label so "English" and "Inggris" compare equal.
      */
     private function normalizeLanguage(string $language): string
@@ -267,19 +346,35 @@ class GenerateScheduleCombinations
     }
 
     /**
+     * Determine whether the student explicitly asked for a course ("Wajib ambil" or "Prioritaskan"). Only then may
+     * its remedial classes be used: they are meant for students retaking the course, not for the regular load.
+     */
+    private function isChosenByStudent(int $courseId): bool
+    {
+        return in_array($courseId, $this->preferences->requiredCourseIds, true)
+            || in_array($courseId, $this->preferences->priorityCourseIds, true);
+    }
+
+    /**
      * Determine the courses every combination must contain.
      *
+     * A mandatory course of the chosen semester is only required when it has a regular (non-remedial) class opened for
+     * the preferred study programs: a course offered just as a remedial "kelas R" is a retake for students of later
+     * semesters, and another program's mandatory course is not part of this student's semester load.
+     *
      * @param  BaseCollection<int, Course>  $courses
+     * @param  array<int, int>  $regularCourseIds  Courses with a non-remedial class for the preferred prodi in the period.
      * @param  array<int, int>  $lockedCourseIds
      * @return list<int>
      */
-    private function requiredCourseIds(BaseCollection $courses, array $lockedCourseIds): array
+    private function requiredCourseIds(BaseCollection $courses, array $regularCourseIds, array $lockedCourseIds): array
     {
         $preferences = $this->preferences;
 
         $semesterMandatory = $preferences->semester === null ? [] : $courses
             ->filter(fn (Course $course): bool => $course->type === CourseType::Mandatory
                 && $course->semester === $preferences->semester
+                && in_array($course->id, $regularCourseIds, true)
                 && ! in_array($course->id, $preferences->excludedCourseIds, true))
             ->keys()
             ->all();
@@ -308,7 +403,12 @@ class GenerateScheduleCombinations
     }
 
     /**
-     * Flatten the courses and their candidate classes into compact arrays, with classes in chronological order.
+     * Flatten the courses and their candidate classes into compact arrays in search order, and precompute what the
+     * remaining courses can still contribute from every position (used by the upper bound).
+     *
+     * Required courses come first, those with the fewest classes first, so dead ends surface early. Optional courses
+     * follow, priority courses and courses with a preferred lecturer first, then the heavier ones. Within a course,
+     * classes with a preferred lecturer are tried first, then in weekly order.
      *
      * @param  BaseCollection<int, Course>  $courses
      * @param  BaseCollection<int, Collection<int, CourseClass>>  $candidates
@@ -319,212 +419,260 @@ class GenerateScheduleCombinations
     {
         $preferences = $this->preferences;
         $entries = [];
-        $pool = [];
 
-        foreach ([...$requiredCourseIds, ...$optionalCourseIds] as $courseIndex => $courseId) {
-            $course = $courses[$courseId];
-            $isPriority = in_array($courseId, $preferences->priorityCourseIds, true);
-
-            $entries[$courseIndex] = [
-                'id' => $courseId,
-                'sks' => (int) $candidates[$courseId]->max('sks'),
-                'elective' => $course->type === CourseType::Elective,
-                'priority' => $isPriority,
-                'required' => in_array($courseId, $requiredCourseIds, true),
-            ];
-
-            foreach ($candidates[$courseId] as $class) {
-                $pool[] = [
+        foreach ([...$requiredCourseIds, ...$optionalCourseIds] as $courseId) {
+            $classes = $candidates[$courseId]
+                ->map(fn (CourseClass $class): array => [
                     'id' => $class->id,
-                    'course' => $courseIndex,
                     'sks' => $class->sks,
                     'day' => $class->day->value,
                     'start' => $this->minutes($class->start_time),
                     'end' => $this->minutes($class->end_time),
                     'preferred' => $class->lecturers->pluck('id')->intersect($preferences->preferredLecturerIds)->isNotEmpty(),
-                    'priority' => $isPriority,
-                ];
-            }
+                ])
+                ->sort(fn (array $a, array $b): int => ($b['preferred'] <=> $a['preferred'])
+                    ?: ($a['day'] <=> $b['day'])
+                    ?: ($a['start'] <=> $b['start'])
+                    ?: ($a['id'] <=> $b['id']))
+                ->values()
+                ->all();
+
+            $entries[] = [
+                'id' => $courseId,
+                'elective' => $courses[$courseId]->type === CourseType::Elective,
+                'priority' => in_array($courseId, $preferences->priorityCourseIds, true),
+                'required' => in_array($courseId, $requiredCourseIds, true),
+                'hasPreferred' => in_array(true, array_column($classes, 'preferred'), true),
+                'maxSks' => max([0, ...array_column($classes, 'sks')]),
+                'classes' => $classes,
+            ];
         }
 
-        // Chronological order; within the same slot try priority courses and preferred lecturers first so strong
-        // combinations are found early and tighten the bound sooner.
-        usort($pool, fn (array $a, array $b): int => ($a['day'] <=> $b['day'])
-            ?: ($a['start'] <=> $b['start'])
+        usort($entries, fn (array $a, array $b): int => ($b['required'] <=> $a['required'])
+            ?: ($a['required'] ? count($a['classes']) <=> count($b['classes']) : 0)
             ?: ($b['priority'] <=> $a['priority'])
-            ?: ($b['preferred'] <=> $a['preferred'])
-            ?: ($a['end'] <=> $b['end'])
+            ?: ($b['hasPreferred'] <=> $a['hasPreferred'])
+            ?: ($b['maxSks'] <=> $a['maxSks'])
             ?: ($a['id'] <=> $b['id']));
 
-        $lastPosition = [];
-        $lastPreferredPosition = [];
+        foreach ($entries as $courseIndex => $entry) {
+            $positions = [];
 
-        foreach ($pool as $position => $class) {
-            $lastPosition[$class['course']] = $position;
-
-            if ($class['preferred']) {
-                $lastPreferredPosition[$class['course']] = $position;
+            foreach ($entry['classes'] as $class) {
+                $positions[] = count($this->pool);
+                $this->pool[] = ['course' => $courseIndex, ...$class];
             }
+
+            $this->courses[] = [
+                'id' => $entry['id'],
+                'elective' => $entry['elective'],
+                'priority' => $entry['priority'],
+                'required' => $entry['required'],
+                'classes' => $positions,
+            ];
         }
 
-        $this->pool = $pool;
-        $this->courses = [];
+        $this->buildSuffixBounds($entries);
+    }
 
-        foreach ($entries as $courseIndex => $entry) {
-            $this->courses[] = [
-                ...$entry,
-                'lastPosition' => $lastPosition[$courseIndex] ?? -1,
-                'lastPreferredPosition' => $lastPreferredPosition[$courseIndex] ?? -1,
-            ];
-            $this->courseTaken[$courseIndex] = false;
+    /**
+     * Precompute, for every course index, what the courses from that index on can still add: the reachable SKS totals
+     * (required courses must be added, optional ones may be) and how many electives, priority courses and preferred
+     * lecturer courses remain. Clashes are ignored, so these are optimistic bounds.
+     *
+     * @param  list<array{elective: bool, priority: bool, required: bool, hasPreferred: bool, classes: array<int, array{sks: int}>}>  $entries
+     */
+    private function buildSuffixBounds(array $entries): void
+    {
+        $limitMask = (1 << (min($this->preferences->maxSks, 62) + 1)) - 1;
+        $count = count($entries);
+
+        $this->suffixReachableSks = array_fill(0, $count + 1, 1);
+        $this->suffixElectives = array_fill(0, $count + 1, 0);
+        $this->suffixPriorities = array_fill(0, $count + 1, 0);
+        $this->suffixPreferred = array_fill(0, $count + 1, 0);
+        $this->suffixRequired = array_fill(0, $count + 1, 0);
+
+        for ($index = $count - 1; $index >= 0; $index--) {
+            $entry = $entries[$index];
+            $next = $this->suffixReachableSks[$index + 1];
+            $withCourse = 0;
+
+            foreach (array_unique(array_column($entry['classes'], 'sks')) as $sks) {
+                $withCourse |= $next << $sks;
+            }
+
+            $this->suffixReachableSks[$index] = ($entry['required'] ? $withCourse : $next | $withCourse) & $limitMask;
+            $this->suffixElectives[$index] = $this->suffixElectives[$index + 1] + ($entry['elective'] ? 1 : 0);
+            $this->suffixPriorities[$index] = $this->suffixPriorities[$index + 1] + ($entry['priority'] ? 1 : 0);
+            $this->suffixPreferred[$index] = $this->suffixPreferred[$index + 1] + ($entry['hasPreferred'] ? 1 : 0);
+            $this->suffixRequired[$index] = $this->suffixRequired[$index + 1] + ($entry['required'] ? 1 : 0);
         }
     }
 
     /**
-     * Decide whether to take the class at $position, then continue with the next class.
+     * Decide the class (or, for an optional course, no class) of the course at $index, then continue with the next.
      */
-    private function search(int $position, int $sks, int $electives, int $priorities, int $preferred, int $days, int $gaps): void
+    private function search(int $index, int $sks, int $electives, int $priorities, int $preferred, int $days): void
     {
         if (++$this->nodes >= self::NODE_BUDGET) {
             return;
         }
 
         $preferences = $this->preferences;
-        $remainingSks = 0;
-        $remainingElectives = 0;
-        $remainingPriorities = 0;
-        $remainingPreferred = 0;
+        $capacity = $preferences->maxSks - $sks;
+        $reachable = $this->suffixReachableSks[$index] & ((1 << ($capacity + 1)) - 1);
 
-        foreach ($this->courses as $courseIndex => $course) {
-            if ($this->courseTaken[$courseIndex]) {
-                continue;
-            }
-
-            if ($course['lastPosition'] < $position) {
-                if ($course['required']) {
-                    return;
-                }
-
-                continue;
-            }
-
-            $remainingSks += $course['sks'];
-            $remainingElectives += $course['elective'] ? 1 : 0;
-            $remainingPriorities += $course['priority'] ? 1 : 0;
-            $remainingPreferred += $course['lastPreferredPosition'] >= $position ? 1 : 0;
-        }
-
-        if ($electives + $remainingElectives < $preferences->minElectives || $sks + $remainingSks < $preferences->minSks) {
+        // The remaining required courses no longer fit within the SKS limit.
+        if ($reachable === 0) {
             return;
         }
 
-        $upperBound = ($sks + min($remainingSks, $preferences->maxSks - $sks)) * self::SKS_WEIGHT
-            + ($priorities + $remainingPriorities) * self::PRIORITY_WEIGHT
-            + ($preferred + $remainingPreferred) * self::PREFERRED_LECTURER_WEIGHT
-            - $days * $this->dayWeight
-            - ($gaps / 60) * $this->gapHourWeight;
+        $maxAddedSks = strlen(decbin($reachable)) - 1;
+
+        if ($sks + $maxAddedSks < $preferences->minSks || $electives + $this->suffixElectives[$index] < $preferences->minElectives) {
+            return;
+        }
+
+        // Days on campus only grow as classes are added; idle time may shrink, so it is left out of the bound.
+        $upperBound = ($sks + $maxAddedSks) * self::SKS_WEIGHT
+            + ($priorities + $this->suffixPriorities[$index]) * self::PRIORITY_WEIGHT
+            + ($preferred + $this->suffixPreferred[$index]) * self::PREFERRED_LECTURER_WEIGHT
+            - $days * $this->dayWeight;
 
         if ($upperBound <= $this->cutoffScore()) {
             return;
         }
 
-        if ($position === count($this->pool)) {
-            $this->record($sks, $electives, $priorities, $preferred, $days, $gaps);
+        // Every course is decided, or nothing optional fits any more and no required course is left.
+        if ($index === count($this->courses) || ($reachable === 1 && $this->suffixRequired[$index] === 0)) {
+            if ($sks >= $preferences->minSks && $electives >= $preferences->minElectives) {
+                $this->record($sks, $electives, $priorities, $preferred, $days);
+            }
 
             return;
         }
 
-        $class = $this->pool[$position];
-        $course = $this->courses[$class['course']];
-        $previousEnd = $this->dayEnd[$class['day']] ?? null;
+        $course = $this->courses[$index];
+        $electiveLimitReached = $course['elective'] && ! $course['required']
+            && $preferences->maxElectives !== null && $electives >= $preferences->maxElectives;
 
-        $canTake = ! $this->courseTaken[$class['course']]
-            && $sks + $class['sks'] <= $preferences->maxSks
-            && ($previousEnd === null || $class['start'] >= $previousEnd)
-            && ! ($course['elective'] && ! $course['required'] && $preferences->maxElectives !== null && $electives >= $preferences->maxElectives);
+        if (! $electiveLimitReached) {
+            foreach ($course['classes'] as $position) {
+                $class = $this->pool[$position];
 
-        if ($canTake) {
-            $gap = $previousEnd === null ? 0 : $class['start'] - $previousEnd;
+                if ($class['sks'] > $capacity || $this->clashes($class)) {
+                    continue;
+                }
 
-            $this->chosen[] = $position;
-            $this->courseTaken[$class['course']] = true;
-            $this->dayEnd[$class['day']] = $class['end'];
+                $isNewDay = ! isset($this->dayIntervals[$class['day']]);
+                $this->chosen[] = $position;
+                $this->dayIntervals[$class['day']][] = [$class['start'], $class['end']];
 
-            $this->search(
-                $position + 1,
-                $sks + $class['sks'],
-                $electives + ($course['elective'] ? 1 : 0),
-                $priorities + ($course['priority'] ? 1 : 0),
-                $preferred + ($class['preferred'] ? 1 : 0),
-                $days + ($previousEnd === null ? 1 : 0),
-                $gaps + ($gap > self::IGNORED_GAP_MINUTES ? $gap : 0),
-            );
+                $this->search(
+                    $index + 1,
+                    $sks + $class['sks'],
+                    $electives + ($course['elective'] ? 1 : 0),
+                    $priorities + ($course['priority'] ? 1 : 0),
+                    $preferred + ($class['preferred'] ? 1 : 0),
+                    $days + ($isNewDay ? 1 : 0),
+                );
 
-            array_pop($this->chosen);
-            $this->courseTaken[$class['course']] = false;
+                array_pop($this->chosen);
+                array_pop($this->dayIntervals[$class['day']]);
 
-            if ($previousEnd === null) {
-                unset($this->dayEnd[$class['day']]);
-            } else {
-                $this->dayEnd[$class['day']] = $previousEnd;
+                if ($this->dayIntervals[$class['day']] === []) {
+                    unset($this->dayIntervals[$class['day']]);
+                }
             }
         }
 
-        $this->search($position + 1, $sks, $electives, $priorities, $preferred, $days, $gaps);
+        if (! $course['required']) {
+            $this->search($index + 1, $sks, $electives, $priorities, $preferred, $days);
+        }
     }
 
     /**
-     * Score a new combination must beat to enter the result list.
+     * Determine whether a class overlaps a chosen class on the same day (back-to-back classes do not clash).
+     *
+     * @param  array{day: int, start: int, end: int}  $class
+     */
+    private function clashes(array $class): bool
+    {
+        foreach ($this->dayIntervals[$class['day']] ?? [] as [$start, $end]) {
+            if ($class['start'] < $end && $start < $class['end']) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Total idle minutes between the chosen classes, ignoring short breaks.
+     */
+    private function gapMinutes(): int
+    {
+        $gaps = 0;
+
+        foreach ($this->dayIntervals as $intervals) {
+            usort($intervals, fn (array $a, array $b): int => $a[0] <=> $b[0]);
+
+            for ($i = 1, $count = count($intervals); $i < $count; $i++) {
+                $gap = $intervals[$i][0] - $intervals[$i - 1][1];
+
+                if ($gap > self::IGNORED_GAP_MINUTES) {
+                    $gaps += $gap;
+                }
+            }
+        }
+
+        return $gaps;
+    }
+
+    /**
+     * Score a new combination must beat to still be able to enter the result list.
      */
     private function cutoffScore(): float
     {
-        $scores = array_column($this->best, 'score');
-
-        if ($scores === [] || count($scores) < $this->preferences->limit) {
-            return -INF;
-        }
-
-        return min($scores);
+        return $this->cutoff;
     }
 
     /**
-     * Score the current selection and keep it if it ranks among the best course sets.
+     * Score the current selection and keep it if it can still make the result list, either as the best arrangement
+     * of its course set or as an alternative arrangement (other parallel classes) of a course set already found.
      */
-    private function record(int $sks, int $electives, int $priorities, int $preferred, int $days, int $gaps): void
+    private function record(int $sks, int $electives, int $priorities, int $preferred, int $days): void
     {
         if ($this->chosen === []) {
             return;
         }
 
+        $gaps = $this->gapMinutes();
         $score = $sks * self::SKS_WEIGHT
             + $priorities * self::PRIORITY_WEIGHT
             + $preferred * self::PREFERRED_LECTURER_WEIGHT
             - $days * $this->dayWeight
             - ($gaps / 60) * $this->gapHourWeight;
 
+        if ($score <= $this->cutoff) {
+            return;
+        }
+
+        $classes = $this->chosen;
+        usort($classes, fn (int $a, int $b): int => ($this->pool[$a]['day'] <=> $this->pool[$b]['day'])
+            ?: ($this->pool[$a]['start'] <=> $this->pool[$b]['start']));
+
         $courseIds = array_map(fn (int $position): int => $this->courses[$this->pool[$position]['course']]['id'], $this->chosen);
         sort($courseIds);
         $key = implode('-', $courseIds);
 
-        if (isset($this->best[$key]) && $this->best[$key]['score'] >= $score) {
-            return;
-        }
-
-        if (! isset($this->best[$key]) && count($this->best) >= $this->preferences->limit) {
-            $scores = array_column($this->best, 'score', 'key');
-            $worstKey = $scores === [] ? false : array_search(min($scores), $scores, true);
-
-            if ($worstKey === false || $this->best[$worstKey]['score'] >= $score) {
-                return;
-            }
-
-            unset($this->best[$worstKey]);
-        }
-
-        $this->best[$key] = [
+        $arrangements = $this->best[$key] ?? [];
+        $arrangements[] = [
             'key' => $key,
+            'classKey' => implode('-', array_map(fn (int $position): int => $this->pool[$position]['id'], $classes)),
             'score' => $score,
-            'classes' => $this->chosen,
+            'classes' => $classes,
             'sks' => $sks,
             'electives' => $electives,
             'priorities' => $priorities,
@@ -532,18 +680,86 @@ class GenerateScheduleCombinations
             'days' => $days,
             'gaps' => $gaps,
         ];
+        usort($arrangements, $this->rankEntries(...));
+        $this->best[$key] = array_slice($arrangements, 0, $this->preferences->limit);
+
+        $this->raiseCutoff();
     }
 
     /**
-     * Turn the recorded best entries into ranked combinations.
+     * Raise the score a combination must beat once the result list is settled up to it, and forget the stored
+     * combinations below it.
+     *
+     * With at least `limit` distinct course sets, only their best arrangements can be shown, so the cutoff is the
+     * `limit`-th best of those. With fewer, alternative arrangements fill the list, so it is the `limit`-th best
+     * arrangement overall. The cutoff never goes down, which keeps earlier pruning decisions valid.
+     */
+    private function raiseCutoff(): void
+    {
+        $limit = $this->preferences->limit;
+        $setBestScores = array_map(fn (array $arrangements): float => $arrangements[0]['score'], $this->best);
+
+        if (count($setBestScores) >= $limit) {
+            rsort($setBestScores);
+            $candidate = $setBestScores[$limit - 1];
+        } else {
+            $scores = array_merge(...array_map(fn (array $arrangements): array => array_column($arrangements, 'score'), array_values($this->best)));
+            rsort($scores);
+            $candidate = $scores[$limit - 1] ?? -INF;
+        }
+
+        if ($candidate <= $this->cutoff) {
+            return;
+        }
+
+        $this->cutoff = $candidate;
+
+        foreach ($this->best as $key => $arrangements) {
+            $kept = array_values(array_filter($arrangements, fn (array $entry): bool => $entry['score'] >= $candidate));
+
+            if ($kept === []) {
+                unset($this->best[$key]);
+            } else {
+                $this->best[$key] = $kept;
+            }
+        }
+    }
+
+    /**
+     * Order stored combinations from best to worst, deterministically.
+     *
+     * @param  array{key: string, classKey: string, score: float}  $a
+     * @param  array{key: string, classKey: string, score: float}  $b
+     */
+    private function rankEntries(array $a, array $b): int
+    {
+        return ($b['score'] <=> $a['score']) ?: strcmp($a['key'], $b['key']) ?: strcmp($a['classKey'], $b['classKey']);
+    }
+
+    /**
+     * Turn the recorded entries into ranked combinations: the best arrangement of each distinct course set first and,
+     * when there are fewer course sets than requested, the best alternative arrangements to fill the list.
      *
      * @param  BaseCollection<int, CourseClass>  $classesById
      * @return list<ScheduleCombination>
      */
     private function combinations(BaseCollection $classesById): array
     {
-        $best = array_values($this->best);
-        usort($best, fn (array $a, array $b): int => ($b['score'] <=> $a['score']) ?: strcmp($a['key'], $b['key']));
+        $limit = $this->preferences->limit;
+        $setBests = [];
+        $alternatives = [];
+
+        foreach ($this->best as $arrangements) {
+            $setBests[] = $arrangements[0];
+            array_push($alternatives, ...array_slice($arrangements, 1));
+        }
+
+        usort($setBests, $this->rankEntries(...));
+        usort($alternatives, $this->rankEntries(...));
+
+        $best = array_slice($setBests, 0, $limit);
+        $best = [...$best, ...array_slice($alternatives, 0, $limit - count($best))];
+        usort($best, $this->rankEntries(...));
 
         return array_map(fn (array $entry): ScheduleCombination => new ScheduleCombination(
             classes: array_map(fn (int $position): CourseClass => $classesById[$this->pool[$position]['id']], $entry['classes']),

@@ -24,6 +24,8 @@ function scheduleCsvFile(string $contents): string
 
 const SAMPLE_SCHEDULE = __DIR__.'/../../../Fixtures/jadwal-if-genap-2025-2026.xlsx';
 
+const GRID_SCHEDULE = __DIR__.'/../../../Fixtures/jadwal-kuliah-grid-if-genap-2025-2026.xlsx';
+
 it('imports every class of the sample schedule', function () {
     $result = app(ImportScheduleSpreadsheet::class)->handle(SAMPLE_SCHEDULE, currentKrsPeriod());
 
@@ -208,6 +210,138 @@ it('reports invalid rows while importing the valid ones', function () {
             'Baris 4: jam selesai (09:00) harus setelah jam mulai (10:00).',
             "Baris 5: SKS 'tiga' tidak valid.",
         ]);
+});
+
+it('imports every class of the department grid schedule from its visible sheet', function () {
+    $result = app(ImportScheduleSpreadsheet::class)->handle(GRID_SCHEDULE, currentKrsPeriod());
+
+    expect($result->classesCreated)->toBe(237)
+        ->and($result->coursesCreated)->toBe(107)
+        ->and($result->rowsSkipped)->toBe(3)
+        ->and($result->errors)->toBe([
+            'Sel E46: kelas Kalkulus 2 (IUP) sudah diimpor dari Sel E18; satu kelas hanya dapat memiliki satu jadwal.',
+            'Sel C48: kelas Kalkulus 2 (IF, RKA) sudah diimpor dari Sel C20; satu kelas hanya dapat memiliki satu jadwal.',
+            'Sel Y60: kelas Topik Dalam Data Mining C (S3) sudah diimpor dari Sel L22; satu kelas hanya dapat memiliki satu jadwal.',
+        ])
+        ->and(CourseClass::inPeriod(currentKrsPeriod())->count())->toBe(237);
+});
+
+it('maps grid cells onto courses and classes', function () {
+    app(ImportScheduleSpreadsheet::class)->handle(GRID_SCHEDULE, currentKrsPeriod());
+
+    $imk = Course::where('name', 'Interaksi Manusia dan Komputer')->sole();
+    $imkA = $imk->classes()->where(['name' => 'A', 'prodi' => 'IF'])->sole();
+
+    expect($imk->type)->toBe(CourseType::Mandatory)
+        ->and($imk->semester)->toBe(6)
+        ->and($imk->classes()->count())->toBe(9)
+        ->and($imkA->day)->toBe(Day::Selasa)
+        ->and([$imkA->start_time, $imkA->end_time])->toBe(['13:30', '15:20'])
+        ->and($imkA->room)->toBe('IF-104')
+        ->and($imkA->capacity)->toBe(50)
+        ->and($imkA->language)->toBe('Indonesia')
+        ->and($imkA->lecturerCodes())->toBe('DH');
+
+    $networkSecurity = Course::where('name', 'Keamanan Jaringan')->sole();
+
+    expect($networkSecurity->type)->toBe(CourseType::Elective)
+        ->and($networkSecurity->classes()->sole()->language)->toBe('English');
+
+    $iupClass = Course::where('name', 'Manajemen Basis Data')->sole()->classes()->where('prodi', 'IUP')->sole();
+
+    expect($iupClass->name)->toBe('IUP I')
+        ->and($iupClass->language)->toBe('English');
+
+    $microservices = Course::where('name', 'Arsitektur Microservice dan Aplikasinya')->sole()->classes()->sole();
+
+    expect($microservices->prodi)->toBe('RPL')
+        ->and($microservices->lecturers()->pluck('code')->sort()->values()->all())->toBe(['BN', 'MA']);
+
+    $religion = Course::where('name', 'Agama Islam')->sole();
+    $religionRpl = $religion->classes()->where('prodi', 'RPL')->sole();
+
+    expect($religion->type)->toBe(CourseType::General)
+        ->and($religionRpl->day)->toBe(Day::Rabu)
+        ->and([$religionRpl->start_time, $religionRpl->end_time])->toBe(['09:00', '10:50'])
+        ->and($religionRpl->room)->toBeNull()
+        ->and($religionRpl->label())->toBe('RPL');
+
+    $ethics = Course::where('name', 'Etika Profesi')->sole();
+
+    expect($ethics->semester)->toBe(8)
+        ->and($ethics->sks)->toBe(2)
+        ->and($ethics->classes()->sole()->prodiList())->toBe(['IF', 'RKA', 'IUP']);
+});
+
+it('detects unprefixed postgraduate grid cells from the colour legend', function () {
+    app(ImportScheduleSpreadsheet::class)->handle(GRID_SCHEDULE, currentKrsPeriod());
+
+    $auditTopic = Course::where('name', 'Topik Dalam Audit Sistem')->sole();
+    $computationalIntelligence = Course::where('name', 'Kecerdasan Komputasional')->sole();
+    $thesisDefense = Course::where('name', 'Sidang Proposal Tesis')->sole();
+
+    expect($auditTopic->type)->toBe(CourseType::Elective)
+        ->and($auditTopic->classes()->pluck('prodi')->unique()->all())->toBe(['S2'])
+        ->and($computationalIntelligence->type)->toBe(CourseType::Mandatory)
+        ->and($computationalIntelligence->classes()->pluck('prodi')->unique()->all())->toBe(['S2'])
+        ->and($thesisDefense->classes()->pluck('prodi')->unique()->all())->toBe(['S2'])
+        ->and(CourseClass::where('prodi', 'S2')->count())->toBe(61)
+        ->and(CourseClass::where('prodi', 'S3')->count())->toBe(18)
+        ->and(CourseClass::where('prodi', '')->count())->toBe(2);
+});
+
+it('imports a grid layout and reports course cells without a detail cell and detail cells without a course', function () {
+    $path = scheduleCsvFile(implode("\n", [
+        'Hari,Jam,IF-101 (kapasitas 40),Okupansi Kelas',
+        'Senin,07.00 - 07.50,IF_Basis Data A,0.5',
+        ',08.00 - 08.50,Sem 4 / AB + CD / 3 SKS,',
+        ',09.00 - 09.50,IF_Grafika B,',
+        ',10.00 - 10.50,,',
+        ',11.00 - 11.50,Sem 2 / EF / 3 SKS,',
+        "Jum'at,07.00 - 07.50,RPL_Basis Data M (EN),",
+        ',08.00 - 08.50,Sem 2 / AB / 4 SKS,',
+    ]));
+
+    $result = app(ImportScheduleSpreadsheet::class)->handle($path, currentKrsPeriod());
+
+    $classA = CourseClass::where('name', 'A')->sole();
+    $classM = CourseClass::where('name', 'M')->sole();
+
+    expect($result->classesCreated)->toBe(2)
+        ->and($result->errors)->toBe([
+            "Sel C4: keterangan 'Sem / dosen / SKS' di bawah 'IF_Grafika B' tidak ditemukan.",
+            "Sel C6: keterangan 'Sem 2 / EF / 3 SKS' tidak didahului nama mata kuliah.",
+        ])
+        ->and($classA->course->name)->toBe('Basis Data')
+        ->and($classA->course->type)->toBe(CourseType::Elective)
+        ->and($classA->prodi)->toBe('IF')
+        ->and($classA->day)->toBe(Day::Senin)
+        ->and([$classA->start_time, $classA->end_time])->toBe(['07:00', '08:50'])
+        ->and($classA->room)->toBe('IF-101')
+        ->and($classA->capacity)->toBe(40)
+        ->and($classA->lecturers()->pluck('code')->sort()->values()->all())->toBe(['AB', 'CD'])
+        ->and($classM->prodi)->toBe('RPL')
+        ->and($classM->day)->toBe(Day::Jumat)
+        ->and($classM->language)->toBe('English')
+        ->and($classM->sks)->toBe(4);
+});
+
+it('takes the course semester, type and sks most of its classes agree on', function () {
+    $path = scheduleCsvFile(implode("\n", [
+        'Mata Kuliah,Kelas,Prodi,Semester,Jenis,SKS,Hari,Mulai,Selesai',
+        'Basis Data,A,IF,6,Wajib,3,Senin,07.00,08.50',
+        'Basis Data,B,IF,6,Wajib,3,Selasa,07.00,08.50',
+        'Basis Data,M,RPL,4,Pilihan,4,Rabu,07.00,08.50',
+    ]));
+
+    app(ImportScheduleSpreadsheet::class)->handle($path, currentKrsPeriod());
+
+    $course = Course::sole();
+
+    expect($course->semester)->toBe(6)
+        ->and($course->type)->toBe(CourseType::Mandatory)
+        ->and($course->sks)->toBe(3)
+        ->and($course->classes()->where('name', 'M')->sole()->sks)->toBe(4);
 });
 
 it('rejects a spreadsheet without a header row', function () {

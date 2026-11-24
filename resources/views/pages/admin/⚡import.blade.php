@@ -240,6 +240,11 @@ new #[Title('Import Jadwal')] class extends Component {
                 Jam boleh ditulis <code>07.00</code> atau <code>07:00</code>; dosen dipisah koma (mis. <code>BN, MA</code>).
             </flux:text>
             <flux:text class="text-sm">
+                Layout grid jadwal jurusan (sheet <strong>Jadwal Kuliah</strong>) juga dikenali otomatis: kolom <strong>Hari</strong> dan <strong>Jam</strong> di kiri, ruang sebagai header kolom,
+                dan tiap kelas ditulis sebagai sel <code>IF_Nama MK A</code> di atas sel <code>Sem 4 / AB, CD / 3 SKS</code>.
+                MK tercetak tebal dianggap wajib, tercetak miring atau bertanda <code>(EN)</code> berbahasa Inggris, dan kolom SKPB menjadi MK umum. Kelas S2/S3 tanpa prefix prodi dikenali dari warna selnya sesuai legenda di bawah grid. Sheet tersembunyi diabaikan.
+            </flux:text>
+            <flux:text class="text-sm">
                 Kelas disimpan ke periode yang dipilih. Import ulang ke periode yang sama akan memperbarui kelas yang sudah ada (dicocokkan berdasarkan mata kuliah + kelas + prodi), bukan membuat duplikat.
                 Mata kuliah dipakai bersama oleh semua periode.
             </flux:text>

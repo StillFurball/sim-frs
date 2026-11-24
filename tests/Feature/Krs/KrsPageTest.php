@@ -5,6 +5,7 @@ use App\Enums\Term;
 use App\Models\AcademicPeriod;
 use App\Models\Course;
 use App\Models\CourseClass;
+use App\Models\Lecturer;
 use App\Models\User;
 use Livewire\Livewire;
 
@@ -33,6 +34,19 @@ test('taking a class adds it to the student KRS', function () {
     Livewire::test('pages::krs.index')->call('take', $class->id);
 
     $this->assertDatabaseHas('enrollments', ['user_id' => $student->id, 'course_class_id' => $class->id]);
+});
+
+test('the student KRS lists the lecturer codes of each taken class', function () {
+    $student = User::factory()->create();
+    $taughtClass = CourseClass::factory()->create();
+    $taughtClass->lecturers()->attach(Lecturer::factory()->create(['code' => 'BN']));
+    $untaughtClass = CourseClass::factory()->at(Day::Jumat, '13:30')->create();
+    $student->courseClasses()->attach([$taughtClass->id, $untaughtClass->id]);
+    $this->actingAs($student);
+
+    Livewire::test('pages::krs.index')
+        ->assertSeeHtml('<span data-test="taken-lecturers">BN</span>')
+        ->assertSeeHtml('<span data-test="taken-lecturers">—</span>');
 });
 
 test('taking a clashing class shows the clash and does not enroll', function () {
@@ -154,6 +168,29 @@ test('the KRS page lists only the classes of the selected period', function () {
         ->set('periodId', $past->id)
         ->assertSee('Grafika Komputer')
         ->assertDontSee('Deep Learning');
+});
+
+test('the prodi filter lists the period programs and keeps joint and open classes for each program', function () {
+    $period = AcademicPeriod::factory()->active()->create();
+    CourseClass::factory()->inPeriod($period)->for(Course::factory()->state(['name' => 'Otomata']))->create(['prodi' => 'IF']);
+    CourseClass::factory()->inPeriod($period)->for(Course::factory()->state(['name' => 'Kalkulus 2']))->create(['prodi' => 'IF, RKA']);
+    CourseClass::factory()->inPeriod($period)->for(Course::factory()->state(['name' => 'Topik Dalam Audit Sistem']))->create(['prodi' => 'S2']);
+    CourseClass::factory()->inPeriod($period)->for(Course::factory()->state(['name' => 'Game Engine']))->create(['prodi' => '']);
+    $this->actingAs(User::factory()->create());
+
+    $component = Livewire::test('pages::krs.index')->set('prodi', 'RKA');
+
+    expect($component->get('prodiOptions'))->toBe(['IF', 'RKA', 'S2']);
+    $component->assertSee('Kalkulus 2')
+        ->assertSee('Game Engine')
+        ->assertDontSee('Otomata')
+        ->assertDontSee('Topik Dalam Audit Sistem')
+        ->set('prodi', 'S2')
+        ->assertSee('Topik Dalam Audit Sistem')
+        ->assertDontSee('Kalkulus 2')
+        ->set('prodi', '')
+        ->assertSee('Otomata')
+        ->assertSee('Topik Dalam Audit Sistem');
 });
 
 test('the KRS page explains when there is no academic period yet', function () {

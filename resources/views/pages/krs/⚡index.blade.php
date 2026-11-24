@@ -11,6 +11,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Livewire\Attributes\Computed;
 use Livewire\Attributes\Title;
@@ -28,6 +29,8 @@ new #[Title('Isi KRS')] class extends Component {
     public string $semester = '';
 
     public string $day = '';
+
+    public string $prodi = '';
 
     public bool $hideUnavailable = false;
 
@@ -185,7 +188,7 @@ new #[Title('Isi KRS')] class extends Component {
      */
     private function refreshKrs(): void
     {
-        unset($this->period, $this->isEditable, $this->myClasses, $this->takenSks, $this->rows, $this->semesters);
+        unset($this->period, $this->isEditable, $this->myClasses, $this->takenSks, $this->rows, $this->semesters, $this->prodiOptions);
     }
 
     /**
@@ -293,6 +296,29 @@ new #[Title('Isi KRS')] class extends Component {
     }
 
     /**
+     * Distinct study programs the viewed period's classes are opened for, for the filter.
+     *
+     * @return list<string>
+     */
+    #[Computed]
+    public function prodiOptions(): array
+    {
+        if ($this->period === null) {
+            return [];
+        }
+
+        return CourseClass::query()
+            ->inPeriod($this->period)
+            ->distinct()
+            ->pluck('prodi')
+            ->flatMap(fn (string $prodi): array => array_filter(array_map('trim', explode(',', $prodi))))
+            ->unique()
+            ->sort()
+            ->values()
+            ->all();
+    }
+
+    /**
      * Filtered classes of the viewed period, each paired with what the student can do with it.
      *
      * @return list<array{class: CourseClass, state: string, reason: string|null, tone: string|null, detail: string|null}>
@@ -317,6 +343,7 @@ new #[Title('Isi KRS')] class extends Component {
             ->when($this->semester !== '', fn (Builder $query) => $query->whereHas('course', fn (Builder $course) => $course->where('semester', (int) $this->semester)))
             ->when($this->day !== '', fn (Builder $query) => $query->where('day', (int) $this->day))
             ->get()
+            ->when($this->prodi !== '', fn (Collection $classes) => $classes->filter(fn (CourseClass $class): bool => $this->isOpenForSelectedProdi($class)))
             ->sortBy(fn (CourseClass $class): string => $class->course->name.'|'.$class->label())
             ->values();
 
@@ -333,6 +360,17 @@ new #[Title('Isi KRS')] class extends Component {
         }
 
         return $rows;
+    }
+
+    /**
+     * Determine whether a class is opened for the selected study program. A class without any prodi is open to every
+     * program, matching the planner; joint classes such as "IF, RKA" match each of their programs.
+     */
+    private function isOpenForSelectedProdi(CourseClass $class): bool
+    {
+        $offered = array_map(fn (string $prodi): string => Str::upper($prodi), $class->prodiList());
+
+        return $offered === [] || in_array(Str::upper(trim($this->prodi)), $offered, true);
     }
 
     /**
@@ -476,6 +514,7 @@ new #[Title('Isi KRS')] class extends Component {
                                 @if ($taken->room)
                                     · {{ $taken->room }}
                                 @endif
+                                · Dosen <span data-test="taken-lecturers">{{ $taken->lecturerCodes() ?: '—' }}</span>
                             </flux:text>
                         </div>
                         @if ($this->isEditable)
@@ -494,7 +533,7 @@ new #[Title('Isi KRS')] class extends Component {
     <div class="space-y-3">
         <flux:heading size="lg">Daftar Kelas</flux:heading>
 
-        <div class="grid gap-3 md:grid-cols-2 lg:grid-cols-5">
+        <div class="grid gap-3 md:grid-cols-2 lg:grid-cols-6">
             <div class="lg:col-span-2">
                 <flux:input wire:model.live.debounce.300ms="search" icon="magnifying-glass" aria-label="Cari kelas" placeholder="Cari mata kuliah, kode, atau dosen…" />
             </div>
@@ -514,6 +553,12 @@ new #[Title('Isi KRS')] class extends Component {
                 <flux:select.option value="">Semua hari</flux:select.option>
                 @foreach (\App\Enums\Day::cases() as $dayOption)
                     <flux:select.option wire:key="day-{{ $dayOption->value }}" :value="$dayOption->value">{{ $dayOption->label() }}</flux:select.option>
+                @endforeach
+            </flux:select>
+            <flux:select wire:model.live="prodi" aria-label="Filter prodi" data-test="prodi-filter">
+                <flux:select.option value="">Semua prodi</flux:select.option>
+                @foreach ($this->prodiOptions as $prodiOption)
+                    <flux:select.option wire:key="prodi-{{ $prodiOption }}" :value="$prodiOption">{{ $prodiOption }}</flux:select.option>
                 @endforeach
             </flux:select>
         </div>
@@ -547,7 +592,12 @@ new #[Title('Isi KRS')] class extends Component {
                                 <x-krs.class-action :row="$row" :editable="$this->isEditable" class="mt-2 xl:hidden" />
                             </flux:table.cell>
                             <flux:table.cell>
-                                <div>{{ $class->label() }}</div>
+                                <div class="flex items-center gap-1.5">
+                                    <span>{{ $class->label() }}</span>
+                                    @if ($class->isRemedial())
+                                        <flux:badge size="sm" color="zinc">Remedial</flux:badge>
+                                    @endif
+                                </div>
                                 @if ($class->prodi !== '' && $class->prodi !== $class->label())
                                     <div class="text-xs text-zinc-500 dark:text-zinc-400">{{ $class->prodi }}</div>
                                 @endif

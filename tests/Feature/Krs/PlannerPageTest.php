@@ -64,6 +64,43 @@ test('students can open the planner', function () {
     $this->get(route('krs.planner'))->assertOk()->assertSee('Cari kombinasi')->assertSee('2025/2026 Genap');
 });
 
+test('the course search filters the preference list by name or code and keeps hidden preferences', function () {
+    $period = AcademicPeriod::factory()->active()->create();
+    $deepLearning = Course::factory()->elective()->create(['name' => 'Deep Learning', 'code' => 'EF234611']);
+    $graphics = Course::factory()->elective()->create(['name' => 'Grafika Komputer', 'code' => 'EF234622']);
+    CourseClass::factory()->inPeriod($period)->for($deepLearning)->create();
+    CourseClass::factory()->inPeriod($period)->for($graphics)->create();
+    $this->actingAs(User::factory()->create());
+
+    Livewire::test('pages::krs.planner')
+        ->set("coursePreferences.{$graphics->id}", 'excluded')
+        ->set('courseSearch', 'deep')
+        ->assertSee('Deep Learning')
+        ->assertDontSee('Grafika Komputer')
+        ->set('courseSearch', 'ef234622')
+        ->assertSee('Grafika Komputer')
+        ->assertDontSee('Deep Learning')
+        ->set('courseSearch', 'basis data')
+        ->assertSee('Tidak ada mata kuliah yang cocok dengan pencarian.')
+        ->assertSet("coursePreferences.{$graphics->id}", 'excluded');
+});
+
+test('courses offered only as a remedial class are marked and do not add a mandatory semester option', function () {
+    $period = AcademicPeriod::factory()->active()->create();
+    $mandatory = Course::factory()->mandatory()->create(['name' => 'Otomata', 'semester' => 6]);
+    $remedialOnly = Course::factory()->mandatory()->create(['name' => 'Dasar Pemrograman', 'semester' => 4]);
+    CourseClass::factory()->inPeriod($period)->for($mandatory)->create(['name' => 'A']);
+    CourseClass::factory()->inPeriod($period)->for($mandatory)->create(['name' => 'R']);
+    CourseClass::factory()->inPeriod($period)->for($remedialOnly)->create(['name' => 'R']);
+    $this->actingAs(User::factory()->create());
+
+    $component = Livewire::test('pages::krs.planner');
+
+    expect($component->get('mandatorySemesters'))->toBe([6])
+        ->and($component->get('remedialOnlyCourseIds'))->toBe([$remedialOnly->id]);
+    $component->assertSet('semester', '6')->assertSeeHtml('data-test="remedial-badge"');
+});
+
 test('the planner refuses to run without an active period', function () {
     AcademicPeriod::factory()->of(2025, Term::Genap)->create();
     $this->actingAs(User::factory()->create());

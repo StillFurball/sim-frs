@@ -16,6 +16,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Livewire\Attributes\Computed;
 use Livewire\Attributes\Title;
@@ -36,6 +37,8 @@ new #[Title('Rencana Otomatis')] class extends Component {
 
     /** @var array<int|string, string> Course id => neutral|required|priority|excluded */
     public array $coursePreferences = [];
+
+    public string $courseSearch = '';
 
     /** @var array<int|string, string> Lecturer id => neutral|preferred|avoided */
     public array $lecturerPreferences = [];
@@ -149,6 +152,26 @@ new #[Title('Rencana Otomatis')] class extends Component {
     }
 
     /**
+     * Get the offered courses whose name or code matches the course search. Preferences of hidden courses are kept.
+     *
+     * @return Collection<int, Course>
+     */
+    #[Computed]
+    public function visibleCourses(): Collection
+    {
+        $search = trim($this->courseSearch);
+
+        if ($search === '') {
+            return $this->courses;
+        }
+
+        return $this->courses
+            ->filter(fn (Course $course): bool => Str::contains($course->name, $search, ignoreCase: true)
+                || ($course->code !== null && Str::contains($course->code, $search, ignoreCase: true)))
+            ->values();
+    }
+
+    /**
      * Get the lecturers teaching in the active period, ordered by code.
      *
      * @return Collection<int, Lecturer>
@@ -160,14 +183,48 @@ new #[Title('Rencana Otomatis')] class extends Component {
     }
 
     /**
-     * Get the semesters that have mandatory courses offered in the active period.
+     * Get the IDs of the offered courses that only have remedial classes ("kelas R") in the active period.
+     *
+     * @return list<int>
+     */
+    #[Computed]
+    public function remedialOnlyCourseIds(): array
+    {
+        $period = $this->period;
+
+        if ($period === null) {
+            return [];
+        }
+
+        return CourseClass::query()
+            ->inPeriod($period)
+            ->get(['course_id', 'name'])
+            ->groupBy('course_id')
+            ->filter(fn (\Illuminate\Support\Collection $classes): bool => $classes->every(fn (CourseClass $class): bool => $class->isRemedial()))
+            ->keys()
+            ->map(fn (mixed $courseId): int => (int) $courseId)
+            ->values()
+            ->all();
+    }
+
+    /**
+     * Get the semesters that have mandatory courses with regular (non-remedial) classes in the active period.
      *
      * @return list<int>
      */
     #[Computed]
     public function mandatorySemesters(): array
     {
-        return $this->offeredInPeriod(Course::query())
+        $period = $this->period;
+
+        if ($period === null) {
+            return [];
+        }
+
+        return Course::query()
+            ->whereHas('classes', fn (Builder $class) => $class
+                ->where('course_classes.academic_period_id', $period->id)
+                ->where('course_classes.name', '!=', CourseClass::REMEDIAL_CLASS_NAME))
             ->where('type', CourseType::Mandatory)
             ->whereNotNull('semester')
             ->distinct()
@@ -514,38 +571,62 @@ new #[Title('Rencana Otomatis')] class extends Component {
                     </div>
                     <flux:button size="sm" variant="ghost" x-on:click="open = ! open" x-text="open ? 'Sembunyikan' : 'Tampilkan'">Tampilkan</flux:button>
                 </div>
-                <div x-show="open" x-cloak class="max-h-[28rem] overflow-y-auto">
-                    <flux:table>
-                        <flux:table.columns>
-                            <flux:table.column>Mata kuliah</flux:table.column>
-                            <flux:table.column>SKS</flux:table.column>
-                            <flux:table.column>Preferensi</flux:table.column>
-                        </flux:table.columns>
-                        <flux:table.rows>
-                            @foreach ($this->courses as $course)
-                                <flux:table.row wire:key="course-pref-{{ $course->id }}">
-                                    <flux:table.cell class="whitespace-normal">
-                                        <div class="font-medium">{{ $course->name }}</div>
-                                        <div class="mt-1 flex items-center gap-1">
-                                            <flux:badge size="sm" :color="$course->type->color()">{{ $course->type->label() }}</flux:badge>
-                                            @if ($course->semester)
-                                                <span class="text-xs text-zinc-500">Sem {{ $course->semester }}</span>
-                                            @endif
-                                        </div>
-                                    </flux:table.cell>
-                                    <flux:table.cell>{{ $course->sks }}</flux:table.cell>
-                                    <flux:table.cell>
-                                        <flux:select size="sm" wire:model="coursePreferences.{{ $course->id }}" :aria-label="'Preferensi '.$course->name">
-                                            <flux:select.option value="neutral">Netral</flux:select.option>
-                                            <flux:select.option value="required">Wajib ambil</flux:select.option>
-                                            <flux:select.option value="priority">Prioritaskan</flux:select.option>
-                                            <flux:select.option value="excluded">Hindari</flux:select.option>
-                                        </flux:select>
-                                    </flux:table.cell>
-                                </flux:table.row>
-                            @endforeach
-                        </flux:table.rows>
-                    </flux:table>
+                <div x-show="open" x-cloak class="space-y-3">
+                    <flux:input
+                        wire:model.live.debounce.300ms="courseSearch"
+                        icon="magnifying-glass"
+                        size="sm"
+                        clearable
+                        placeholder="Cari nama atau kode mata kuliah…"
+                        aria-label="Cari mata kuliah"
+                        data-test="course-search"
+                    />
+                    <flux:text class="text-xs">
+                        Kelas R adalah kelas remedial untuk mengulang MK tahap persiapan, jadi tidak ikut diwajibkan otomatis.
+                        Set MK-nya ke <strong>Wajib ambil</strong> atau <strong>Prioritaskan</strong> kalau kamu perlu mengulang.
+                    </flux:text>
+                    <div class="max-h-[28rem] overflow-y-auto">
+                        <flux:table>
+                            <flux:table.columns>
+                                <flux:table.column>Mata kuliah</flux:table.column>
+                                <flux:table.column>SKS</flux:table.column>
+                                <flux:table.column>Preferensi</flux:table.column>
+                            </flux:table.columns>
+                            <flux:table.rows>
+                                @forelse ($this->visibleCourses as $course)
+                                    <flux:table.row wire:key="course-pref-{{ $course->id }}">
+                                        <flux:table.cell class="whitespace-normal">
+                                            <div class="font-medium">{{ $course->name }}</div>
+                                            <div class="mt-1 flex items-center gap-1">
+                                                <flux:badge size="sm" :color="$course->type->color()">{{ $course->type->label() }}</flux:badge>
+                                                @if ($course->semester)
+                                                    <span class="text-xs text-zinc-500">Sem {{ $course->semester }}</span>
+                                                @endif
+                                                @if (in_array($course->id, $this->remedialOnlyCourseIds, true))
+                                                    <flux:badge size="sm" color="zinc" data-test="remedial-badge">Kelas R (remedial)</flux:badge>
+                                                @endif
+                                            </div>
+                                        </flux:table.cell>
+                                        <flux:table.cell>{{ $course->sks }}</flux:table.cell>
+                                        <flux:table.cell>
+                                            <flux:select size="sm" wire:model="coursePreferences.{{ $course->id }}" :aria-label="'Preferensi '.$course->name">
+                                                <flux:select.option value="neutral">Netral</flux:select.option>
+                                                <flux:select.option value="required">Wajib ambil</flux:select.option>
+                                                <flux:select.option value="priority">Prioritaskan</flux:select.option>
+                                                <flux:select.option value="excluded">Hindari</flux:select.option>
+                                            </flux:select>
+                                        </flux:table.cell>
+                                    </flux:table.row>
+                                @empty
+                                    <flux:table.row>
+                                        <flux:table.cell colspan="3" class="text-center text-zinc-500">
+                                            {{ $this->courses->isEmpty() ? 'Belum ada mata kuliah pada periode aktif.' : 'Tidak ada mata kuliah yang cocok dengan pencarian.' }}
+                                        </flux:table.cell>
+                                    </flux:table.row>
+                                @endforelse
+                            </flux:table.rows>
+                        </flux:table>
+                    </div>
                 </div>
             </flux:card>
 

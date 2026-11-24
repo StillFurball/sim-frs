@@ -11,6 +11,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Str;
 
 /**
  * A parallel class (section) of a course with its own schedule, room and lecturers.
@@ -39,6 +40,11 @@ class CourseClass extends Model
 {
     /** @use HasFactory<CourseClassFactory> */
     use HasFactory;
+
+    /**
+     * Name of remedial classes, see isRemedial().
+     */
+    public const string REMEDIAL_CLASS_NAME = 'R';
 
     /**
      * Take the SKS from the course catalogue when a class is created or moved to another course without its own SKS.
@@ -126,6 +132,15 @@ class CourseClass extends Model
         return $this->day === $other->day
             && $this->start_time < $other->end_time
             && $other->start_time < $this->end_time;
+    }
+
+    /**
+     * Determine whether this is a remedial class ("kelas R"): a mandatory course reopened for students of later
+     * semesters who did not pass it in the preparatory year, so it is not part of the regular semester load.
+     */
+    public function isRemedial(): bool
+    {
+        return Str::upper(trim($this->name)) === self::REMEDIAL_CLASS_NAME;
     }
 
     /**

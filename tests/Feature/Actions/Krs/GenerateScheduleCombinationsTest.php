@@ -1,6 +1,7 @@
 <?php
 
 use App\Actions\Krs\GenerateScheduleCombinations;
+use App\Actions\Krs\ImportScheduleSpreadsheet;
 use App\Actions\Krs\SyncStudentClasses;
 use App\Enums\Day;
 use App\Enums\Term;
@@ -74,6 +75,137 @@ it('builds conflict-free combinations with every mandatory course and the minimu
 
     expect(collect($result->combinations)->map(fn ($combination) => implode('-', combinationCourseIds($combination)))->duplicates())->toBeEmpty();
 });
+
+it('offers different electives when mandatory courses with many parallel classes leave room for only one', function () {
+    $student = User::factory()->create();
+    app(ImportScheduleSpreadsheet::class)->handle(base_path('tests/Fixtures/jadwal-kuliah-grid-if-genap-2025-2026.xlsx'), currentKrsPeriod());
+
+    $result = plan($student, maxSks: 24, semester: 4, minElectives: 0, prodi: ['IF'], limit: 5);
+
+    $courseSets = collect($result->combinations)->map(fn (ScheduleCombination $combination) => implode('-', combinationCourseIds($combination)));
+
+    expect($result->combinations)->toHaveCount(5)
+        ->and(collect($result->combinations)->pluck('totalSks')->unique()->all())->toBe([23])
+        ->and($courseSets->unique())->toHaveCount(5);
+});
+
+it('fills the results with other parallel classes when there are fewer course sets than requested', function () {
+    $student = User::factory()->create();
+    $favourite = Lecturer::factory()->create();
+    $automata = Course::factory()->mandatory()->create(['semester' => 4]);
+    $classA = plannerClass($automata, Day::Senin, '07:00', ['name' => 'A']);
+    $classB = plannerClass($automata, Day::Selasa, '07:00', ['name' => 'B']);
+    $classC = plannerClass($automata, Day::Rabu, '07:00', ['name' => 'C']);
+    $classB->lecturers()->attach($favourite);
+
+    $result = plan($student, semester: 4, minElectives: 0, maxElectives: 0, preferredLecturerIds: [$favourite->id], limit: 5);
+
+    $classIds = collect($result->combinations)->map(fn (ScheduleCombination $combination) => $combination->classIds());
+
+    expect($result->combinations)->toHaveCount(3)
+        ->and($classIds->first())->toBe([$classB->id])
+        ->and($classIds->flatten()->sort()->values()->all())->toBe([$classA->id, $classB->id, $classC->id]);
+});
+
+it('still prefers different course sets over other parallel classes of the same courses', function () {
+    $student = User::factory()->create();
+    $mandatory = Course::factory()->mandatory()->create(['semester' => 4]);
+    plannerClass($mandatory, Day::Senin, '07:00', ['name' => 'A']);
+    plannerClass($mandatory, Day::Selasa, '07:00', ['name' => 'B']);
+    $electives = Course::factory()->elective()->count(3)->create();
+    plannerClass($electives[0], Day::Rabu, '07:00');
+    plannerClass($electives[1], Day::Kamis, '07:00');
+    plannerClass($electives[2], Day::Jumat, '07:00');
+
+    $result = plan($student, semester: 4, minElectives: 1, maxElectives: 1, limit: 3);
+
+    expect(collect($result->combinations)->map(fn (ScheduleCombination $combination) => implode('-', combinationCourseIds($combination)))->unique())->toHaveCount(3);
+});
+
+it('explains when the mandatory courses leave no room for the minimum electives', function () {
+    $student = User::factory()->create();
+    plannerClass(Course::factory()->mandatory()->create(['semester' => 4]), Day::Senin, '07:00', ['sks' => 20]);
+    plannerClass(Course::factory()->elective()->create(), Day::Selasa, '07:00', ['sks' => 3]);
+    plannerClass(Course::factory()->elective()->create(), Day::Rabu, '07:00', ['sks' => 2]);
+
+    $result = plan($student, maxSks: 24, semester: 4, minElectives: 2);
+
+    expect($result->combinations)->toBe([])
+        ->and($result->exploredNodes)->toBe(0)
+        ->and($result->warnings)->toBe([
+            'Batas 24 SKS tidak cukup: MK wajib 20 SKS ditambah minimal 2 MK pilihan (paling ringan 5 SKS) menjadi 25 SKS. Kurangi "Minimal MK pilihan" atau lepas MK yang diwajibkan.',
+        ]);
+});
+
+it('does not require semester mandatory courses that are only offered as a remedial class', function () {
+    $student = User::factory()->create();
+    $databases = Course::factory()->mandatory()->create(['semester' => 4, 'sks' => 3]);
+    $databasesA = plannerClass($databases, Day::Senin, '07:00', ['name' => 'A', 'sks' => 3]);
+    $programming = Course::factory()->mandatory()->create(['semester' => 4, 'sks' => 4]);
+    plannerClass($programming, Day::Rabu, '15:30', ['name' => 'R', 'sks' => 4]);
+    $linearAlgebra = Course::factory()->mandatory()->create(['semester' => 4, 'sks' => 4]);
+    plannerClass($linearAlgebra, Day::Jumat, '09:00', ['name' => 'R', 'sks' => 4]);
+
+    $result = plan($student, maxSks: 6, semester: 4, minElectives: 0);
+
+    expect($result->warnings)->toBe([])
+        ->and($result->combinations)->toHaveCount(1)
+        ->and($result->combinations[0]->classIds())->toBe([$databasesA->id]);
+});
+
+it('does not require semester mandatory courses that only another study program offers', function () {
+    $student = User::factory()->create();
+    $automata = Course::factory()->mandatory()->create(['semester' => 4]);
+    $automataA = plannerClass($automata, Day::Senin, '07:00', ['name' => 'A', 'prodi' => 'IF']);
+    $frameworks = Course::factory()->mandatory()->create(['semester' => 4]);
+    plannerClass($frameworks, Day::Selasa, '07:00', ['name' => 'M', 'prodi' => 'RPL']);
+
+    $result = plan($student, semester: 4, minElectives: 0, prodi: ['IF']);
+
+    expect($result->warnings)->toBe([])
+        ->and($result->combinations)->toHaveCount(1)
+        ->and($result->combinations[0]->classIds())->toBe([$automataA->id]);
+});
+
+it('explains when the mandatory courses exceed the sks limit and hints at the prodi filter', function (array $prodi, string $warning) {
+    $student = User::factory()->create();
+    plannerClass(Course::factory()->mandatory()->create(['semester' => 4]), Day::Senin, '07:00', ['prodi' => 'IF', 'sks' => 3]);
+    plannerClass(Course::factory()->mandatory()->create(['semester' => 4]), Day::Selasa, '07:00', ['prodi' => 'IF', 'sks' => 3]);
+
+    $result = plan($student, maxSks: 4, semester: 4, minElectives: 0, prodi: $prodi);
+
+    expect($result->combinations)->toBe([])
+        ->and($result->warnings)->toBe([$warning]);
+})->with([
+    'one prodi' => [['IF'], 'Total SKS mata kuliah wajib (6) melebihi batas 4 SKS.'],
+    'several prodi' => [['IF', 'RPL'], 'Total SKS mata kuliah wajib (6) melebihi batas 4 SKS. Pilih prodi kamu saja di filter Prodi agar MK wajib prodi lain tidak ikut diwajibkan.'],
+]);
+
+it('never places a student in the remedial class of a course they did not ask for', function () {
+    $student = User::factory()->create();
+    $databases = Course::factory()->mandatory()->create(['semester' => 4]);
+    plannerClass($databases, Day::Senin, '07:00', ['name' => 'A']);
+    plannerClass($databases, Day::Selasa, '07:00', ['name' => 'R']);
+
+    $result = plan($student, semester: 4, minElectives: 0, avoidedDays: [Day::Senin->value]);
+
+    expect($result->combinations)->toBe([])
+        ->and($result->warnings)->toBe(["Mata kuliah {$databases->name} wajib diambil, tetapi tidak ada kelasnya yang memenuhi filter."]);
+});
+
+it('uses a remedial class when the student requires or prioritises its course', function (string $preference) {
+    $student = User::factory()->create();
+    $programming = Course::factory()->mandatory()->create(['semester' => 1]);
+    $remedial = plannerClass($programming, Day::Rabu, '15:30', ['name' => 'R']);
+
+    $result = plan($student, ...['semester' => 4, 'minElectives' => 0, $preference => [$programming->id]]);
+
+    expect($result->combinations)->toHaveCount(1)
+        ->and($result->combinations[0]->classIds())->toBe([$remedial->id]);
+})->with([
+    'wajib ambil' => 'requiredCourseIds',
+    'prioritaskan' => 'priorityCourseIds',
+]);
 
 it('finds the highest SKS total that a brute-force search can reach', function () {
     $student = User::factory()->create();
